@@ -195,6 +195,20 @@ for m = 1:numel(modes)
     v = check(v, ok, sprintf('mode %s: analytic I/O size table matches spec (%s)', tag, msg));
 end
 
+% ------------------------------------------- generated scripts: coder-safe
+% A persistent variable inside a MATLAB Function block is a parse error for
+% MATLAB Coder unless every read is an isempty guard; the package bakes such
+% constants in instead, so no generated script may contain one.
+ok = true; msg = '';
+for k = 1:numel(gens)
+    scr = feval(gens{k}, cfgs.A);
+    if ~isempty(regexp(scr, '(?m)^\s*persistent\b', 'once'))
+        ok = false;
+        msg = sprintf('%s uses persistent', gens{k});
+    end
+end
+v = check(v, ok, sprintf('no generated block script uses persistent (%s)', msg));
+
 % the two modes must really differ
 if isfield(cfgs, 'A') && isfield(cfgs, 'B')
     a = cfgs.A; b = cfgs.B;

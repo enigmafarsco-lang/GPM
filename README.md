@@ -125,7 +125,13 @@ target — mode A needs ≥~145 traces, the shipped 200 give 1.39).
    loggers, as the model documentation always promised.
 9. `gpr_check_config` rejects a non-power-of-two `n_ifft` explicitly (the test
    suite asserted the rejection before the rule existed).
-10. Algorithm fixes found by actually running the chain: IFFT dimension in
+10. `B10_RangeProc` kept its Kaiser window in a `persistent` cache; MATLAB
+    Coder rejects any read of a persistent variable that is not an isempty
+    guard, which surfaced as "underspecified signal dimensions" for the whole
+    model. The window is now a numeric literal baked in at generation time
+    (bit-identical output), and `validate_package` fails if any generated
+    script ever reintroduces a persistent.
+11. Algorithm fixes found by actually running the chain: IFFT dimension in
    B10, cable-delay/air-leg consistency in B09, component-wise median
    background in B11 (mean/SVD smeared targets), coherent
    `exp(+j2βR)` migration stack in B12 (envelope migration defocused deep
