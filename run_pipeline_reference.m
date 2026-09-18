@@ -34,6 +34,15 @@ addParameter(p, 'verbose', true);
 parse(p, varargin{:});
 opt = p.Results;
 
+off = gpr_path_sanity();
+if ~isempty(off)
+    error('GPR:pathShadow', ...
+        ['Mixed GPM installations on the MATLAB path - MATLAB would run a\n' ...
+         'blend of two versions of this package:\n%s\n' ...
+         'Fix with:  restoredefaultpath; rehash toolboxcache; addpath(<this folder>);'], ...
+        strjoin(off, sprintf('\n')));
+end
+
 if isempty(opt.workdir)
     safe = regexprep(cfg.mode, '[^A-Za-z0-9_]', '_');
     opt.workdir = fullfile(tempdir, 'gpr_reference', safe);

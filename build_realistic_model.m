@@ -79,6 +79,15 @@ if exist(slx, 'file') && opt.overwrite
     delete(slx);
 end
 
+% A model of the same name left over from an earlier session (or an old
+% GPR_Realistic.slx elsewhere on the path) would make Simulink warn about
+% shadowing and can make the build attach to the wrong diagram.
+try
+    if bdIsLoaded(model)
+        bdclose(model);
+    end
+catch
+end
 new_system(model);
 set_param(model, ...
     'SolverType',   'Fixed-step', ...

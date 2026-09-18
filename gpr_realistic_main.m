@@ -46,6 +46,15 @@ if ~isempty(here) && isempty(strfind(path, here)) %#ok<STREMP>
     addpath(here);
 end
 
+off = gpr_path_sanity();
+if ~isempty(off)
+    error('GPR:pathShadow', ...
+        ['Mixed GPM installations on the MATLAB path - MATLAB would run a\n' ...
+         'blend of two versions of this package:\n%s\n' ...
+         'Fix with:  restoredefaultpath; rehash toolboxcache; addpath(<this folder>);'], ...
+        strjoin(off, sprintf('\n')));
+end
+
 % ------------------------------------------------------------- configuration
 if isstruct(opt.mode)
     cfg = opt.mode;
@@ -109,7 +118,7 @@ res.elapsed_s = toc(t0);
 % ------------------------------------------------------------ score vs truth
 res.truth = struct('x', cfg.target_x, 'depth', cfg.target_depths, ...
     'rcs', cfg.target_rcs);
-res.match = score_against_truth(res, cfg);
+[res.match, res.unused_det] = score_against_truth(res, cfg);
 
 if opt.verbose
     print_summary(res, cfg);
@@ -127,11 +136,12 @@ end
 end
 
 % ------------------------------------------------------------------ helpers
-function m = score_against_truth(res, cfg)
+function [m, unused] = score_against_truth(res, cfg)
 % Nearest detection for every configured target, within the system
 % resolution.  Missed targets get NaN.
 m = nan(cfg.n_targets, 3);
-used = false(1, res.n_detections);
+unused = false(1, res.n_detections);
+used = unused;
 tol_d = max(2*cfg.depth_resolution, 0.05);
 tol_x = max(3*cfg.dx_trace, 0.3);
 for t = 1:cfg.n_targets
@@ -150,7 +160,7 @@ for t = 1:cfg.n_targets
         m(t, :) = [d.x - cfg.target_x(t), d.depth - cfg.target_depths(t), d.amp];
     end
 end
-m(:, 4) = ~used(:);   %#ok<AGROW> 1 = detection that matches no target
+unused = ~used;   % true for a detection that matches no configured target
 end
 
 function print_summary(res, cfg)
@@ -169,7 +179,7 @@ for t = 1:cfg.n_targets
     end
 end
 ndet = sum(~isnan(res.match(:, 1)));
-nfalse = sum(res.match(:, 4) > 0);
+nfalse = sum(res.unused_det);
 fprintf('detected %d/%d targets, %d unmatched cluster(s), %d detection pixel(s)\n', ...
     ndet, cfg.n_targets, nfalse, res.n_pixels);
 end

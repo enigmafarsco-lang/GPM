@@ -82,6 +82,11 @@ for k = 1:numel(gens)
     v = check(v, ok, sprintf('%s: first function name matches file name', gens{k}));
 end
 
+% ---------------------------------------------- one installation on the path
+off = gpr_path_sanity();
+v = check(v, isempty(off), sprintf('single package installation on path (%s)', ...
+    strjoin(off, '; ')));
+
 % ------------------------------------------------------------ spec + config
 modes = {'A', 'B'};
 cfgs = struct();

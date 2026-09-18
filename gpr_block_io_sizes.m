@@ -66,8 +66,11 @@ for sec = {'rf', 'dsp'}
             prt = str2double(strrep(prt, ':', ''));
             if isempty(prt) || isnan(prt), prt = 1; end
             if isKey(osz, bn)
-                insz{q} = osz(bn){prt};
-                incx{q} = ocx(bn){prt};
+                % MATLAB forbids chaining brace indexing onto a containers.Map
+                % call (osz(bn){prt}); Octave accepts it.  Use a temporary.
+                szs = osz(bn); cxs = ocx(bn);
+                insz{q} = szs{prt};
+                incx{q} = cxs{prt};
             elseif isKey(ip_sz, bn)
                 insz{q} = ip_sz(bn);
                 incx{q} = ip_cx(bn);

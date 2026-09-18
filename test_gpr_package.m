@@ -290,7 +290,7 @@ res = gpr_realistic_main('mode', mode, 'engine', 'reference', ...
     'verbose', false, 'save', false);
 cfg = res.cfg;
 nhit = sum(~isnan(res.match(:, 1)));
-nfalse = sum(res.match(:, 4) > 0);
+nfalse = sum(res.unused_det);
 need(nhit == cfg.n_targets, sprintf('%d/%d targets detected', nhit, ...
     cfg.n_targets));
 need(nfalse == 0, sprintf('%d false alarms', nfalse));
