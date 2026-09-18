@@ -190,6 +190,12 @@ if verbose
     fprintf('  %s\n', sub);
 end
 
+% Analytic port sizes for every block: stamped onto the Stateflow charts so
+% Simulink never has to infer an output size through a chain of MATLAB
+% Function blocks (the classic "not enough information to determine output
+% sizes" failure).
+ios = gpr_block_io_sizes(cfg);
+
 % --- input ports (source references are resolved against the parent model)
 if isfield(section, 'inports')
     for k = 1:numel(section.inports)
@@ -222,10 +228,18 @@ for k = 1:numel(section.blocks)
             b.name, info.nin, numel(b.inputs), b.gen);
     end
     set_mlfcn_script(path, script);
+    set_chart_io(path, ios.(b.name));
 
     % one To Workspace per output port, named exactly like the reference run
     base = sprintf('TP%02d_%s', tp, b.name);
     ypos = b.pos(4);
+
+    % ...and one visible Scope per test point, so TP01-TP14 can be watched
+    % live in the Simulink editor, not only read back from the workspace.
+    scname = sprintf('TP%02d_Scope', tp);
+    add_block('simulink/Sinks/Scope', [blk '/' scname], ...
+        'Position', [b.pos(1)+40, b.pos(2)-70, b.pos(1)+80, b.pos(2)-30], ...
+        'NumInputPorts', num2str(info.nout));
     for q = 1:info.nout
         if q == 1
             varname = lower(base);
@@ -240,6 +254,8 @@ for k = 1:numel(section.blocks)
             'Position', tpos, 'VariableName', varname, ...
             'SaveFormat', 'Timeseries');
         add_line(blk, sprintf('%s/%d', b.name, q), [tpname '/1'], ...
+            'autorouting', 'on');
+        add_line(blk, sprintf('%s/%d', b.name, q), sprintf('%s/%d', scname, q), ...
             'autorouting', 'on');
     end
 
@@ -291,4 +307,117 @@ if isempty(chart)
         'Could not find the Stateflow chart behind MATLAB Function block %s.', path);
 end
 chart.Script = script;
+end
+
+function set_chart_io(path, io)
+% Stamp analytic sizes, types and complexity onto the chart's input and
+% output data.  Best effort by design: a release that exposes the Stateflow
+% data objects differently should warn, not abort the build.
+try
+    rt = sfroot();
+    chart = rt.find('-isa', 'Stateflow.EMChart', 'Path', path);
+    if isempty(chart)
+        [~, nm] = fileparts(path);
+        chart = rt.find('-isa', 'Stateflow.EMChart', 'Name', nm);
+    end
+    if isempty(chart)
+        warning('GPR:build:noChartIO', 'No chart found for %s; sizes not set.', path);
+        return;
+    end
+    chart = chart(1);
+    ds = find_io_data(chart, 'Input');
+    if numel(ds) ~= numel(io.in_sz)
+        warning('GPR:build:ioCount', ...
+            '%s: chart has %d input data objects, spec wires %d; sizes skipped.', ...
+            path, numel(ds), numel(io.in_sz));
+        return;
+    end
+    apply_io(ds, io.in_sz, io.in_cx);
+    ds = find_io_data(chart, 'Output');
+    if numel(ds) ~= numel(io.out_sz)
+        warning('GPR:build:ioCount', ...
+            '%s: chart has %d output data objects, expected %d; sizes skipped.', ...
+            path, numel(ds), numel(io.out_sz));
+        return;
+    end
+    apply_io(ds, io.out_sz, io.out_cx);
+catch ME
+    warning('GPR:build:ioSize', 'Could not stamp I/O sizes on %s: %s', path, ME.message);
+end
+end
+
+function ds = find_io_data(chart, scope)
+ds = [];
+try
+    ds = chart.find('-isa', 'Stateflow.Data', 'Scope', scope);
+catch
+end
+if isempty(ds)
+    try
+        if strcmp(scope, 'Input')
+            ds = chart.inputs;
+        else
+            ds = chart.outputs;
+        end
+    catch
+    end
+end
+if ~isempty(ds)
+    p = zeros(1, numel(ds));
+    for k = 1:numel(ds)
+        p(k) = port_of(ds(k), k);
+    end
+    [~, ord] = sort(p);
+    ds = ds(ord);
+end
+end
+
+function p = port_of(d, fallback)
+p = fallback;
+for f = {'Port', 'PortNumber'}
+    try
+        if isprop(d, f{1})
+            q = d.(f{1});
+            if isnumeric(q) && q > 0
+                p = q;
+                return;
+            end
+        end
+    catch
+    end
+end
+end
+
+function apply_io(ds, szs, cxs)
+for k = 1:numel(ds)
+    p = port_of(ds(k), k);
+    if p < 1 || p > numel(szs)
+        continue;
+    end
+    try
+        ds(k).DataType = 'double';
+    catch
+    end
+    try
+        ds(k).Complexity = cxs{p};
+    catch
+    end
+    set_size(ds(k), szs{p});
+end
+end
+
+function set_size(d, sz)
+forms = {};
+if isequal(sz, [1 1])
+    forms{end+1} = '1';
+end
+forms{end+1} = sprintf('%dx%d', sz(1), sz(2));
+forms{end+1} = sprintf('[%d %d]', sz(1), sz(2));
+for k = 1:numel(forms)
+    try
+        d.Size = forms{k};
+        return;
+    catch
+    end
+end
 end

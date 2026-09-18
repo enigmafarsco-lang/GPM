@@ -13,7 +13,9 @@ apart. Every algorithm block B01–B14 is a generated MATLAB script
 (`code_*.m`); `build_realistic_model.m` pastes each script into a Simulink
 MATLAB Function block, `run_pipeline_reference.m` compiles the same text to
 a temporary function and runs the chain in plain MATLAB/Octave. Test points
-TP01–TP14 log every block output in both engines.
+TP01–TP14 log every block output in both engines; in Simulink each TP is a
+visible Scope (`TPnn_Scope`, one input per output port) plus a To Workspace
+timeseries logger (`tpnn_<block>`, `..._o2` for second ports).
 
 ```
 RF_Front_End                     Digital_Processing
@@ -29,8 +31,9 @@ B07_ADC           TP07 (+noise)  B14_Report       TP14  -> Final_Report_Log
 ## Quick start
 
 ```matlab
-addpath('<this folder>');
-validate_package            % 77 static checks, no Simulink needed
+cd GPM                      % the folder you cloned or unzipped
+addpath(pwd);               % put it on the MATLAB path
+validate_package            % static checks, no Simulink needed
 test_gpr_package            % functional suite (~2 min, both modes)
 
 res = gpr_realistic_main('mode', 'A');   % UAV-mounted, 0.5-3 GHz, shallow
@@ -113,13 +116,30 @@ target — mode A needs ≥~145 traces, the shipped 200 give 1.39).
    plotted no results. It now renders the migrated B-scan with truth and
    detections overlaid, the detection mask, a depth profile, the B14 report
    and the full physics audit.
-7. Algorithm fixes found by actually running the chain: IFFT dimension in
+7. Simulink size inference is no longer left to chance: `gpr_block_io_sizes.m`
+   derives every port size/complexity analytically from the configuration and
+   `build_realistic_model.m` stamps them onto the Stateflow chart data, which
+   is what R2024a asks for when it reports "not enough information to
+   determine output sizes for this block".
+8. TP01–TP14 now carry visible Scope blocks in addition to the To Workspace
+   loggers, as the model documentation always promised.
+9. `gpr_check_config` rejects a non-power-of-two `n_ifft` explicitly (the test
+   suite asserted the rejection before the rule existed).
+10. Algorithm fixes found by actually running the chain: IFFT dimension in
    B10, cable-delay/air-leg consistency in B09, component-wise median
    background in B11 (mean/SVD smeared targets), coherent
    `exp(+j2βR)` migration stack in B12 (envelope migration defocused deep
    targets), dispersion evaluated at `f_center`, valid-band masking in the
    CFAR, and an exact two-pass union-find cluster count in B14 (the old
    seed rule over-counted 8-connected blobs 29 vs 5).
+
+## Shipping a compiled .slx (optional)
+
+`GPR_Realistic.slx` is a build artefact and is git-ignored on purpose: the
+binary is tied to the Simulink release that wrote it, while the scripted
+build reproduces it deterministically anywhere (`gpr_realistic_main` or
+`build_realistic_model` directly). If you want the binary in the repo anyway,
+build it once in your release and `git add -f GPR_Realistic.slx`.
 
 ## Known limitations
 

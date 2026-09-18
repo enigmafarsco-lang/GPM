@@ -143,7 +143,7 @@ for m = 1:numel(modes)
                     ref = blk.inputs{q};
                     [bn, prt] = strtok(ref, ':');
                     prt = str2double(strrep(prt, ':', ''));
-                    if isempty(prt), prt = 1; end
+                    if isempty(prt) || isnan(prt), prt = 1; end
                     if ~any(strcmp(names, bn))
                         ok = false;
                         msg = sprintf('%s: input %d refers to unknown block %s', ...
@@ -160,6 +160,34 @@ for m = 1:numel(modes)
         ok = false; msg = ME.message;
     end
     v = check(v, ok, sprintf('mode %s: spec wiring resolves (%s)', tag, msg));
+
+    % the analytic I/O size table must agree with the spec wiring
+    ok = true; msg = '';
+    try
+        io = gpr_block_io_sizes(cfg);
+        sp2 = gpr_pipeline_spec(cfg);
+        for sec = {'rf', 'dsp'}
+            S = sp2.(sec{1});
+            for j = 1:numel(S.blocks)
+                b = S.blocks{j};
+                e = io.(b.name);
+                if numel(e.in_sz) ~= numel(b.inputs)
+                    ok = false;
+                    msg = sprintf('%s: size table has %d inputs, spec wires %d', ...
+                        b.name, numel(e.in_sz), numel(b.inputs));
+                elseif numel(e.out_sz) ~= numel(e.out_cx)
+                    ok = false;
+                    msg = sprintf('%s: size/complexity list mismatch', b.name);
+                elseif any(cellfun(@(z) any(z <= 0), [e.in_sz e.out_sz]))
+                    ok = false;
+                    msg = sprintf('%s: non-positive port size', b.name);
+                end
+            end
+        end
+    catch ME
+        ok = false; msg = ME.message;
+    end
+    v = check(v, ok, sprintf('mode %s: analytic I/O size table matches spec (%s)', tag, msg));
 end
 
 % the two modes must really differ

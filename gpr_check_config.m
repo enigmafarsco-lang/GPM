@@ -44,6 +44,9 @@ end
 if cfg.n_ifft < cfg.n_tones
     bad('n_ifft (%d) must be >= n_tones (%d).', cfg.n_ifft, cfg.n_tones);
 end
+if mod(log2(cfg.n_ifft), 1) ~= 0
+    bad('n_ifft (%d) must be a power of two (the range axis is a radix-2 IFFT).', cfg.n_ifft);
+end
 if cfg.n_averages < 1
     bad('n_averages must be >= 1 (got %g).', cfg.n_averages);
 end
