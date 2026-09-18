@@ -1,140 +1,294 @@
-function model_name = build_realistic_model(cfg)
-% BUILD_REALISTIC_MODEL  Build the complete algorithm as visible Simulink.
-% Top level: RF_Front_End -> Digital_Processing.
-% Every Bxx block has an observation Scope and To Workspace test point.
+function model = build_realistic_model(cfg, varargin)
+% BUILD_REALISTIC_MODEL  Build the Simulink digital twin of the GPR chain.
+%
+%   model = BUILD_REALISTIC_MODEL(cfg) builds GPR_Realistic.slx from the
+%   configuration struct returned by config_mode_A_uav_shallow() or
+%   config_mode_B_ground_deep().  model = BUILD_REALISTIC_MODEL() uses mode B.
+%
+%   Name/value options
+%       'model_name'  name of the model          (default 'GPR_Realistic')
+%       'folder'      where to save the .slx     (default current folder)
+%       'open'        open the model when done   (default false)
+%       'overwrite'   replace an existing model  (default true)
+%       'verbose'     print progress             (default true)
+%
+%   What gets built
+%   ---------------
+%       RF_Front_End        B01 Environment .. B07 ADC  (+ TP01..TP07)
+%       Digital_Processing  B08 Averaging .. B14 Report (+ TP08..TP14)
+%       top level           the two subsystems, Final_Report_Log (To
+%                           Workspace) and Final_Report_Display
+%
+%   Everything - block list, port wiring, test-point numbering, base
+%   workspace parameters - comes from gpr_pipeline_spec(cfg), which is the
+%   same description run_pipeline_reference.m executes without Simulink.  The
+%   model and the reference simulation therefore cannot drift apart, and
+%   test_gpr_package.m can compare them block by block.
+%
+%   Each algorithm block is a MATLAB Function block whose Script is the text
+%   returned by its code_*.m generator.  The scripts call two shared helpers
+%   (soil_permittivity.m and gpr_range_window.m), so THIS FOLDER MUST BE ON
+%   THE MATLAB PATH when the model is updated, simulated or code-generated;
+%   the function adds it automatically.
+%
+%   Requirements: Simulink (any release since R2016b) and Stateflow for the
+%   MATLAB Function blocks.  No other toolbox is used.
 
-model_name = 'GPR_Realistic';
-create_all_params(cfg);
-if bdIsLoaded(model_name), close_system(model_name,0); end
-if exist([model_name '.slx'],'file'), delete([model_name '.slx']); end
-new_system(model_name); open_system(model_name);
-set_param(model_name,'Solver','FixedStepDiscrete','FixedStep','1', ...
-    'StartTime','0','StopTime','0','SignalLogging','on', ...
-    'SignalLoggingName','gpr_logs','ReturnWorkspaceOutputs','on');
+if nargin < 1 || isempty(cfg)
+    cfg = config_mode_B_ground_deep();
+end
+cfg = gpr_check_config(cfg, cfg.mode);
 
-add_block('built-in/Subsystem',[model_name '/RF_Front_End'], ...
-    'Position',[80 120 390 420]);
-add_block('built-in/Subsystem',[model_name '/Digital_Processing'], ...
-    'Position',[500 120 820 420]);
-add_block('simulink/Sinks/To Workspace',[model_name '/Final_Report_Log'], ...
-    'Position',[900 230 1040 260],'VariableName','gpr_final_report', ...
-    'SaveFormat','Structure With Time');
-add_block('simulink/Sinks/Display',[model_name '/Final_Report_Display'], ...
-    'Position',[900 300 1040 330]);
-add_line(model_name,'Digital_Processing/1','Final_Report_Log/1','autorouting','on');
-add_line(model_name,'Digital_Processing/1','Final_Report_Display/1','autorouting','on');
+p = inputParser();
+addParameter(p, 'model_name', '', @(s) ischar(s) || isstring(s));
+addParameter(p, 'folder', '', @(s) ischar(s) || isstring(s));
+addParameter(p, 'open', false, @(x) islogical(x) || isnumeric(x));
+addParameter(p, 'overwrite', true, @(x) islogical(x) || isnumeric(x));
+addParameter(p, 'verbose', true, @(x) islogical(x) || isnumeric(x));
+parse(p, varargin{:});
+opt = p.Results;
 
-build_rf([model_name '/RF_Front_End'], cfg);
-build_dsp([model_name '/Digital_Processing'], cfg);
-add_line(model_name,'RF_Front_End/1','Digital_Processing/1','autorouting','on');
-
-set_param(model_name,'SimulationCommand','update');
-save_system(model_name);
-fprintf('Built RF_Front_End + Digital_Processing with TP01-TP14.\n');
+spec = gpr_pipeline_spec(cfg);
+if isempty(opt.model_name)
+    opt.model_name = spec.model_name;
+end
+model = char(opt.model_name);
+if isempty(opt.folder)
+    opt.folder = pwd;
 end
 
-function create_all_params(cfg)
-items = {
- 'GPR_F_START',cfg.f_start; 'GPR_F_STOP',cfg.f_stop; 'GPR_UAV_ALTITUDE',cfg.uav_altitude;
- 'GPR_SCAN_LENGTH',cfg.scan_length; 'GPR_SOIL_MOISTURE',cfg.soil_moisture;
- 'GPR_SOIL_SIGMA',cfg.soil_conductivity; 'GPR_PA_GAIN_DB',cfg.pa_gain_dB;
- 'GPR_LNA_GAIN_DB',cfg.lna_gain_dB; 'GPR_NF_DB',cfg.system_nf_dB;
- 'GPR_ADC_ENOB',cfg.adc_enob; 'GPR_N_AVG',cfg.n_averages;
- 'GPR_KAISER_BETA',cfg.kaiser_beta; 'GPR_DEPTH_MIN',cfg.depth_min;
- 'GPR_DEPTH_MAX',cfg.depth_max; 'GPR_PFA',cfg.cfar_pfa;
- 'GPR_TGT_DEPTH',cfg.target_depths(:); 'GPR_TGT_X',cfg.target_x(:);
- 'GPR_TGT_RCS',cfg.target_rcs(:); 'GPR_COUPLING_DB',cfg.antenna_coupling_dB};
-for k=1:size(items,1)
-    p=Simulink.Parameter(items{k,2}); p.DataType='double';
-    assignin('base',items{k,1},p);
+% --------------------------------------------------------------- the path
+here = fileparts(mfilename('fullpath'));
+if ~isempty(here) && isempty(strfind(path, here)) %#ok<STREMP>
+    addpath(here);
+end
+require_simulink();
+
+% ------------------------------------------- base workspace parameters
+install_params(spec, opt.verbose);
+
+% ------------------------------------------------------------- new model
+if bdIsLoaded(model)
+    if ~opt.overwrite
+        error('GPR:build:modelOpen', 'Model %s is already loaded.', model);
+    end
+    close_system(model, 0);
+end
+slx = fullfile(opt.folder, [model '.slx']);
+if exist(slx, 'file') && opt.overwrite
+    delete(slx);
+end
+
+new_system(model);
+set_param(model, ...
+    'SolverType',   'Fixed-step', ...
+    'Solver',       'FixedStepDiscrete', ...
+    'StopTime',     num2str(stop_time(cfg)), ...
+    'FixedStep',    num2str(gpr_cfg_value(cfg, 'sim_fixed_step', 1)), ...
+    'SaveOutput',   'off', ...
+    'SaveState',    'off', ...
+    'SignalLogging','off', ...
+    'ReturnWorkspaceOutputs', 'off');
+if opt.verbose
+    fprintf('Building %s (mode %s)...\n', model, cfg.mode);
+end
+
+% ------------------------------------------------------------ subsystems
+build_subsystem(model, 'RF_Front_End', spec.rf, spec.rf.first_tp, cfg, opt.verbose);
+build_subsystem(model, 'Digital_Processing', spec.dsp, spec.dsp.first_tp, cfg, opt.verbose);
+
+% ------------------------------------------------------------- top level
+set_param([model '/RF_Front_End'], 'Position', spec.top.rf_pos);
+set_param([model '/Digital_Processing'], 'Position', spec.top.dsp_pos);
+
+add_block('simulink/Sinks/To Workspace', [model '/Final_Report_Log'], ...
+    'Position', spec.top.log_pos, 'VariableName', 'gpr_report', ...
+    'SaveFormat', 'Timeseries');
+add_block('simulink/Sinks/Display', [model '/Final_Report_Display'], ...
+    'Position', spec.top.disp_pos);
+
+for k = 1:size(spec.top.links, 1)
+    ln = spec.top.links{k};
+    add_line(model, port_ref(ln.src), port_ref(ln.dst), 'autorouting', 'on');
+end
+
+% ------------------------------------------------- one single update only
+% Updating earlier (the previous version did it while adding each block)
+% makes Simulink analyse a MATLAB Function block before its Script has been
+% replaced, which locks in the default "function y = fcn(u)" signature and
+% then fails on every wiring check.
+if opt.verbose
+    fprintf('  updating diagram (compiles all 14 block scripts)...\n');
+end
+try
+    set_param(model, 'SimulationCommand', 'update');
+catch err
+    save_system(model, slx);
+    error('GPR:build:update', ...
+        ['Updating the diagram failed; the unfinished model was saved to %s.\n' ...
+         '  %s'], slx, err.message);
+end
+
+save_system(model, slx);
+if opt.verbose
+    fprintf('  saved %s\n', slx);
+    fprintf('  %d blocks, %d test points, %d base parameters\n', ...
+        numel(spec.rf.blocks) + numel(spec.dsp.blocks), 14, size(spec.params, 1));
+end
+if opt.open
+    open_system(model);
 end
 end
 
-function build_rf(parent,cfg)
-add_block('simulink/Ports & Subsystems/Out1',[parent '/RF_Out'], ...
-    'Position',[1200 300 1230 320]);
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_ALT'], 'Position',[20 30 90 55],'Value','GPR_UAV_ALTITUDE');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_SCAN'], 'Position',[20 70 90 95],'Value','GPR_SCAN_LENGTH');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_FSTART'], 'Position',[20 120 90 145],'Value','GPR_F_START');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_FSTOP'], 'Position',[20 160 90 185],'Value','GPR_F_STOP');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_PA'], 'Position',[20 230 90 255],'Value','GPR_PA_GAIN_DB');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_MOIST'], 'Position',[20 500 90 525],'Value','GPR_SOIL_MOISTURE');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_SIGMA'], 'Position',[20 540 90 565],'Value','GPR_SOIL_SIGMA');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_TGT_D'], 'Position',[20 580 90 605],'Value','GPR_TGT_DEPTH');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_TGT_X'], 'Position',[20 620 90 645],'Value','GPR_TGT_X');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_TGT_RCS'], 'Position',[20 660 90 685],'Value','GPR_TGT_RCS');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_COUPLING'], 'Position',[20 760 90 785],'Value','GPR_COUPLING_DB');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_LNA'], 'Position',[20 900 90 925],'Value','GPR_LNA_GAIN_DB');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_NF'], 'Position',[20 940 90 965],'Value','GPR_NF_DB');
-add_block('simulink/Ports & Subsystems/Constant',[parent '/P_ENOB'], 'Position',[20 1040 90 1065],'Value','GPR_ADC_ENOB');
-
-add_mlfcn(parent,'B01_Environment',[220 30 420 80],code_environment(cfg));
-add_mlfcn(parent,'B02_Waveform',[500 30 700 80],code_waveform(cfg));
-add_mlfcn(parent,'B03_TX_Chain',[780 30 980 80],code_tx(cfg));
-add_mlfcn(parent,'B04_Channel',[500 180 760 240],code_channel(cfg));
-add_mlfcn(parent,'B05_Coupling',[820 180 1040 240],code_coupling(cfg));
-add_mlfcn(parent,'B06_RX',[500 340 700 390],code_rx(cfg));
-add_mlfcn(parent,'B07_ADC',[780 340 980 390],code_adc(cfg));
-add_line(parent,'P_ALT/1','B01_Environment/1'); add_line(parent,'P_SCAN/1','B01_Environment/2');
-add_line(parent,'P_FSTART/1','B02_Waveform/1'); add_line(parent,'P_FSTOP/1','B02_Waveform/2');
-add_line(parent,'B02_Waveform/1','B03_TX_Chain/1'); add_line(parent,'P_PA/1','B03_TX_Chain/2');
-add_line(parent,'B01_Environment/1','B04_Channel/1'); add_line(parent,'B03_TX_Chain/1','B04_Channel/2');
-add_line(parent,'P_MOIST/1','B04_Channel/3'); add_line(parent,'P_SIGMA/1','B04_Channel/4');
-add_line(parent,'P_TGT_D/1','B04_Channel/5'); add_line(parent,'P_TGT_X/1','B04_Channel/6'); add_line(parent,'P_TGT_RCS/1','B04_Channel/7');
-add_line(parent,'P_FSTART/1','B04_Channel/8'); add_line(parent,'P_FSTOP/1','B04_Channel/9');
-add_line(parent,'B03_TX_Chain/1','B05_Coupling/1'); add_line(parent,'P_COUPLING/1','B05_Coupling/2'); add_line(parent,'B04_Channel/1','B05_Coupling/3');
-add_line(parent,'B05_Coupling/1','B06_RX/1'); add_line(parent,'P_LNA/1','B06_RX/2'); add_line(parent,'P_NF/1','B06_RX/3');
-add_line(parent,'B06_RX/1','B07_ADC/1'); add_line(parent,'P_ENOB/1','B07_ADC/2'); add_line(parent,'B07_ADC/1','RF_Out/1');
-add_all_test_points(parent,{'B01_Environment','B02_Waveform','B03_TX_Chain','B04_Channel','B05_Coupling','B06_RX','B07_ADC'},1);
+% ================================================================= helpers
+function require_simulink()
+if ~license('test', 'Simulink') %#ok<LICTST>
+    error('GPR:build:noSimulink', ...
+        ['Simulink is not available.  Use run_pipeline_reference(cfg) instead: ' ...
+         'it executes exactly the same generated block scripts without a model.']);
+end
 end
 
-function build_dsp(parent,cfg)
-add_block('simulink/Ports & Subsystems/In1',[parent '/RF_In'],'Position',[20 300 50 320]);
-add_block('simulink/Ports & Subsystems/Out1',[parent '/Report_Out'],'Position',[1190 300 1220 320]);
-add_const(parent,'P_NAVG','GPR_N_AVG',[20 40 90 65]); add_const(parent,'P_KAISER','GPR_KAISER_BETA',[20 80 90 105]);
-add_const(parent,'P_FSTART','GPR_F_START',[20 120 90 145]); add_const(parent,'P_FSTOP','GPR_F_STOP',[20 160 90 185]);
-add_const(parent,'P_MOIST','GPR_SOIL_MOISTURE',[20 200 90 225]); add_const(parent,'P_SIGMA','GPR_SOIL_SIGMA',[20 240 90 265]);
-add_const(parent,'P_DMIN','GPR_DEPTH_MIN',[20 520 90 545]); add_const(parent,'P_DMAX','GPR_DEPTH_MAX',[20 560 90 585]);
-add_const(parent,'P_PFA','GPR_PFA',[20 600 90 625]); add_const(parent,'P_SCAN','GPR_SCAN_LENGTH',[20 640 90 665]);
-add_mlfcn(parent,'B08_Averaging',[180 280 380 330],code_averaging(cfg));
-add_mlfcn(parent,'B09_Calibration',[430 280 630 330],code_calibration(cfg));
-add_mlfcn(parent,'B10_RangeProc',[680 280 880 330],code_rangeproc(cfg));
-add_mlfcn(parent,'B11_Background',[930 280 1130 330],code_background(cfg));
-add_mlfcn(parent,'B12_Migration',[430 420 690 480],code_migration(cfg));
-add_mlfcn(parent,'B13_Detection',[740 420 1000 480],code_detection(cfg));
-add_mlfcn(parent,'B14_Report',[1040 420 1240 480],code_report(cfg));
-add_line(parent,'RF_In/1','B08_Averaging/1'); add_line(parent,'P_NAVG/1','B08_Averaging/2');
-add_line(parent,'B08_Averaging/1','B09_Calibration/1'); add_line(parent,'P_FSTART/1','B09_Calibration/2'); add_line(parent,'P_FSTOP/1','B09_Calibration/3');
-add_line(parent,'B09_Calibration/1','B10_RangeProc/1'); add_line(parent,'P_KAISER/1','B10_RangeProc/2');
-add_line(parent,'B10_RangeProc/1','B11_Background/1'); add_line(parent,'B11_Background/1','B12_Migration/1');
-add_line(parent,'P_FSTART/1','B12_Migration/2'); add_line(parent,'P_FSTOP/1','B12_Migration/3'); add_line(parent,'P_MOIST/1','B12_Migration/4'); add_line(parent,'P_SIGMA/1','B12_Migration/5'); add_line(parent,'P_DMAX/1','B12_Migration/6'); add_line(parent,'P_SCAN/1','B12_Migration/7');
-add_line(parent,'B12_Migration/1','B13_Detection/1'); add_line(parent,'P_DMIN/1','B13_Detection/2'); add_line(parent,'P_DMAX/1','B13_Detection/3'); add_line(parent,'P_PFA/1','B13_Detection/4'); add_line(parent,'P_FSTART/1','B13_Detection/5'); add_line(parent,'P_FSTOP/1','B13_Detection/6'); add_line(parent,'P_MOIST/1','B13_Detection/7'); add_line(parent,'P_SIGMA/1','B13_Detection/8');
-add_line(parent,'B13_Detection/1','B14_Report/1'); add_line(parent,'P_FSTART/1','B14_Report/2'); add_line(parent,'P_FSTOP/1','B14_Report/3'); add_line(parent,'P_MOIST/1','B14_Report/4'); add_line(parent,'P_SIGMA/1','B14_Report/5'); add_line(parent,'P_SCAN/1','B14_Report/6'); add_line(parent,'B14_Report/1','Report_Out/1');
-add_all_test_points(parent,{'B08_Averaging','B09_Calibration','B10_RangeProc','B11_Background','B12_Migration','B13_Detection','B14_Report'},8);
+function t = stop_time(cfg)
+% The whole chain is a one-shot batch computation (every block processes a
+% complete profile matrix), so a single major time step is enough.  With a
+% fixed step of 1 s a stop time of 0.5 s produces exactly one step at t = 0.
+t = gpr_cfg_value(cfg, 'sim_stop_time', 0);
+if ~(t > 0)
+    t = 0.5*gpr_cfg_value(cfg, 'sim_fixed_step', 1);
+end
 end
 
-function add_const(parent,name,value,pos)
-add_block('simulink/Sources/Constant',[parent '/' name],'Position',pos,'Value',value);
+function install_params(spec, verbose)
+% One {name, value} pair per row - the previous version of this package built
+% a 1x2N row cell with commas, so its loop only ever created the first one.
+n = 0;
+for k = 1:size(spec.params, 1)
+    name = spec.params{k, 1};
+    value = spec.params{k, 2};
+    assignin('base', name, value);
+    n = n + 1;
 end
-function add_mlfcn(parent,name,pos,script)
-path=[parent '/' name]; add_block('simulink/User-Defined Functions/MATLAB Function',path,'Position',pos);
-set_param(bdroot(parent),'SimulationCommand','update');
-chart=sfroot().find('-isa','Stateflow.EMChart','-and','Path',path);
-if isempty(chart), error('Cannot find MATLAB Function chart %s.',path); end
-chart.Script=script;
+if verbose
+    fprintf('  %d base workspace parameters installed\n', n);
 end
-function add_all_test_points(parent,blocks,first_index)
-for k=1:numel(blocks)
-    b=blocks{k}; idx=first_index+k-1; base=sprintf('TP%02d_%s',idx,b);
-    pos=get_param([parent '/' b],'Position'); x=pos(3)+35; y=pos(2);
-    add_block('simulink/Sinks/To Workspace',[parent '/' base '_LOG'],'Position',[x y x+130 y+25], ...
-        'VariableName',lower(base),'SaveFormat','Structure With Time');
-    add_block('simulink/Sinks/Scope',[parent '/' base '_SCOPE'],'Position',[x y+35 x+130 y+75]);
-    add_line(parent,[b '/1'],[base '_LOG/1'],'autorouting','on');
-    add_line(parent,[b '/1'],[base '_SCOPE/1'],'autorouting','on');
-    ph=get_param([parent '/' b],'PortHandles');
-    for q=1:numel(ph.Outport)
-        set_param(ph.Outport(q),'DataLogging','on','DataLoggingName',base);
+end
+
+function build_subsystem(model, sub, section, first_tp, cfg, verbose)
+blk = [model '/' sub];
+add_block('simulink/Ports & Subsystems/Subsystem', blk, 'Position', [0 0 100 100]);
+% Remove the default In1/Out1 pair that ships with a new subsystem.
+defaults = find_system(blk, 'SearchDepth', 1, 'LookUnderMasks', 'all', ...
+    'FollowLinks', 'on', 'Type', 'block');
+for k = 1:numel(defaults)
+    if ~strcmp(defaults{k}, blk)
+        delete_block(defaults{k});
     end
 end
+
+if verbose
+    fprintf('  %s\n', sub);
+end
+
+% --- input ports (source references are resolved against the parent model)
+if isfield(section, 'inports')
+    for k = 1:numel(section.inports)
+        ip = section.inports{k};
+        add_block('simulink/Sources/In1', [blk '/' ip.name], ...
+            'Position', ip.pos, 'Port', num2str(k));
+    end
+end
+
+% --- constant blocks
+for k = 1:numel(section.consts)
+    cc = section.consts{k};
+    add_block('simulink/Sources/Constant', [blk '/' cc.name], ...
+        'Position', cc.pos, 'Value', cc.param);
+end
+
+% --- algorithm blocks, their scripts and their test points
+tp = first_tp;
+for k = 1:numel(section.blocks)
+    b = section.blocks{k};
+    path = [blk '/' b.name];
+    add_block('simulink/User-Defined Functions/MATLAB Function', path, ...
+        'Position', b.pos);
+    script = feval(b.gen, cfg);
+    info = gpr_parse_script(script);
+    if info.nin ~= numel(b.inputs)
+        error('GPR:build:portMismatch', ...
+            ['%s declares %d input port(s) but the spec wires %d. ' ...
+             'Fix gpr_pipeline_spec.m or %s.m.'], ...
+            b.name, info.nin, numel(b.inputs), b.gen);
+    end
+    set_mlfcn_script(path, script);
+
+    % one To Workspace per output port, named exactly like the reference run
+    base = sprintf('TP%02d_%s', tp, b.name);
+    ypos = b.pos(4);
+    for q = 1:info.nout
+        if q == 1
+            varname = lower(base);
+            tpname = base;
+        else
+            varname = lower(sprintf('%s_o%d', base, q));
+            tpname = sprintf('%s_o%d', base, q);
+        end
+        tpos = [b.pos(1) + 20, ypos + 25 + 45*(q-1), ...
+                b.pos(1) + 190, ypos + 50 + 45*(q-1)];
+        add_block('simulink/Sinks/To Workspace', [blk '/' tpname], ...
+            'Position', tpos, 'VariableName', varname, ...
+            'SaveFormat', 'Timeseries');
+        add_line(blk, sprintf('%s/%d', b.name, q), [tpname '/1'], ...
+            'autorouting', 'on');
+    end
+
+    % data wiring
+    for q = 1:numel(b.inputs)
+        add_line(blk, port_ref(b.inputs{q}), sprintf('%s/%d', b.name, q), ...
+            'autorouting', 'on');
+    end
+    tp = tp + 1;
+end
+
+% --- output ports
+if isfield(section, 'outports')
+    for k = 1:numel(section.outports)
+        op = section.outports{k};
+        add_block('simulink/Sinks/Out1', [blk '/' op.name], ...
+            'Position', op.pos, 'Port', num2str(k));
+        add_line(blk, port_ref(op.source), [op.name '/1'], 'autorouting', 'on');
+    end
+end
+end
+
+function ref = port_ref(src)
+% 'BLOCK' -> 'BLOCK/1', 'BLOCK:N' -> 'BLOCK/N'
+tok = strsplit(src, ':');
+if numel(tok) > 1
+    ref = [tok{1} '/' tok{2}];
+else
+    ref = [tok{1} '/1'];
+end
+end
+
+function set_mlfcn_script(path, script)
+% Replace the Script of a MATLAB Function block.  The Stateflow chart behind
+% the block exists as soon as the block is added; it must NOT be updated
+% before the script is in place (see the comment in build_realistic_model).
+rt = sfroot();
+chart = rt.find('-isa', 'Stateflow.EMChart', 'Path', path);
+if isempty(chart)
+    % Older releases register the chart under the block name only.
+    [~, nm] = fileparts(path);
+    chart = rt.find('-isa', 'Stateflow.EMChart', 'Name', nm);
+    if numel(chart) > 1
+        chart = chart(1);
+    end
+end
+if isempty(chart)
+    error('GPR:build:noChart', ...
+        'Could not find the Stateflow chart behind MATLAB Function block %s.', path);
+end
+chart.Script = script;
 end
