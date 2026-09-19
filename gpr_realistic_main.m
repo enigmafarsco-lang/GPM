@@ -97,6 +97,10 @@ if strcmp(engine, 'simulink') && ~have_simulink
 end
 
 % --------------------------------------------------------------------- run
+if opt.verbose
+    fprintf('GPM package version %s\n', gpr_version());
+end
+
 t0 = tic();
 if strcmp(engine, 'reference')
     res = run_pipeline_reference(cfg, 'seed', opt.seed, 'verbose', opt.verbose);

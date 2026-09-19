@@ -33,6 +33,7 @@ here = fileparts(mfilename('fullpath'));
 if ~isempty(here) && isempty(strfind(path, here)) %#ok<STREMP>
     addpath(here);
 end
+fprintf('GPM package version %s (%s)\n', gpr_version(), here);
 
 v = struct('ok', true, 'n_checks', 0, 'n_fail', 0, 'lines', {{}}, ...
     'failures', {{}});
@@ -253,7 +254,8 @@ end
 
 fprintf('%s\n', strjoin(v.lines, sprintf('\n')));
 if v.ok
-    fprintf('validate_package: ALL %d CHECKS PASSED\n', v.n_checks);
+    fprintf('validate_package: ALL %d CHECKS PASSED (package version %s)\n', ...
+        v.n_checks, gpr_version());
 else
     fprintf('validate_package: %d of %d CHECKS FAILED\n', v.n_fail, v.n_checks);
 end
