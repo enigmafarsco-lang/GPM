@@ -237,7 +237,7 @@ for k = 1:numel(section.blocks)
             b.name, info.nin, numel(b.inputs), b.gen);
     end
     set_mlfcn_script(path, script);
-    set_chart_io(path, ios.(b.name));
+    set_chart_io(path, ios.(b.name), info.inputs, info.outputs);
 
     % one To Workspace per output port, named exactly like the reference run
     base = sprintf('TP%02d_%s', tp, b.name);
@@ -318,7 +318,7 @@ end
 chart.Script = script;
 end
 
-function set_chart_io(path, io)
+function set_chart_io(path, io, names_in, names_out)
 % Stamp analytic sizes, types and complexity onto the chart's input and
 % output data.  Best effort by design: a release that exposes the Stateflow
 % data objects differently should warn, not abort the build.
@@ -341,7 +341,7 @@ try
             path, numel(ds), numel(io.in_sz));
         return;
     end
-    apply_io(ds, io.in_sz, io.in_cx);
+    apply_io(ds, io.in_sz, io.in_cx, names_in);
     ds = find_io_data(chart, 'Output');
     if numel(ds) ~= numel(io.out_sz)
         warning('GPR:build:ioCount', ...
@@ -349,7 +349,7 @@ try
             path, numel(ds), numel(io.out_sz));
         return;
     end
-    apply_io(ds, io.out_sz, io.out_cx);
+    apply_io(ds, io.out_sz, io.out_cx, names_out);
 catch ME
     warning('GPR:build:ioSize', 'Could not stamp I/O sizes on %s: %s', path, ME.message);
 end
@@ -397,9 +397,22 @@ for f = {'Port', 'PortNumber'}
 end
 end
 
-function apply_io(ds, szs, cxs)
+function apply_io(ds, szs, cxs, names)
+% Match chart data to the table BY VARIABLE NAME (the names in the script
+% signature), not by port number: port numbering of Stateflow data objects
+% is the one thing that differs between releases, and a swapped pair would
+% stamp a complex port as real - a Coder parse error.
 for k = 1:numel(ds)
-    p = port_of(ds(k), k);
+    p = -1;
+    for q = 1:numel(names)
+        if strcmp(ds(k).Name, names{q})
+            p = q;
+            break;
+        end
+    end
+    if p < 1
+        p = port_of(ds(k), k);
+    end
     if p < 1 || p > numel(szs)
         continue;
     end
