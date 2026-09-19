@@ -150,7 +150,10 @@ target — mode A needs ≥~145 traces, the shipped 200 give 1.39).
     model. The window is now a numeric literal baked in at generation time
     (bit-identical output), and `validate_package` fails if any generated
     script ever reintroduces a persistent.
-11. Algorithm fixes found by actually running the chain: IFFT dimension in
+11. `B07_ADC` models the quantisation SNR with the full-scale-sine law
+    `6.02*ENOB + 1.76 dB` (the 1.76 dB term was missing), and `noise_std` is
+    reshaped explicitly instead of `(:)`.
+12. Algorithm fixes found by actually running the chain: IFFT dimension in
    B10, cable-delay/air-leg consistency in B09, component-wise median
    background in B11 (mean/SVD smeared targets), coherent
    `exp(+j2βR)` migration stack in B12 (envelope migration defocused deep

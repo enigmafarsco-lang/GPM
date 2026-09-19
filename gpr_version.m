@@ -14,5 +14,7 @@ function v = gpr_version()
 %     1.5  coder type stability (B11/B12), name-based chart I/O stamping
 %     1.6  offline MATLAB-Coder check in validate_package; unfinished models
 %          parked in tempdir; fixes merged into main
-v = '1.6';
+%     1.7  ADC SQNR uses the full-scale-sine law 6.02*ENOB+1.76 dB; explicit
+%          reshape of noise_std (review round 2026-09)
+v = '1.7';
 end
