@@ -12,3 +12,19 @@ slprj/
 
 # local scratch
 .scratch/
+
+# ---- FPGA package artefacts ----
+# simulation outputs and golden copies inside fpga/sim (sources are kept)
+fpga/sim/*
+!fpga/sim/*.v
+!fpga/sim/*_t.hex
+# Vivado project / build outputs
+fpga/vivado_prj/
+fpga/reports/
+fpga/*.xsa
+fpga/*.bit
+.Xil/
+*.jou
+*.log
+*.str
+vivado*.backup.*
