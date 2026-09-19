@@ -7,6 +7,13 @@ calibration → range processing → background removal → migration → CFAR
 detection → report), built as a Simulink model **and** executable without
 Simulink.
 
+> **FPGA/Verilog implementation:** the synthesizable RTL port of this chain
+> for the AMD RFSoC ZCU208 lives in the companion repository
+> **[GPV](https://github.com/enigmafarsco-lang/GPV)**. Its golden vectors are
+> generated from this package's `code_*.m` sources (`make_golden.m`), so the
+> RTL is validated bit-exactly against the algorithms here. GPM itself stays
+> MATLAB/Simulink-only.
+
 Both execution paths are generated from one source of truth,
 `gpr_pipeline_spec.m`, so the model and the reference runner cannot drift
 apart. Every algorithm block B01–B14 is a generated MATLAB script
