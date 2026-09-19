@@ -132,10 +132,14 @@ end
 try
     set_param(model, 'SimulationCommand', 'update');
 catch err
-    save_system(model, slx);
+    % Park the unfinished model in tempdir, NOT in the working folder: an
+    % old GPR_Realistic.slx sitting next to the sources makes Simulink warn
+    % about name shadowing on every later build.
+    tmp = fullfile(tempdir, [model '_UNFINISHED.slx']);
+    save_system(model, tmp);
     error('GPR:build:update', ...
         ['Updating the diagram failed; the unfinished model was saved to %s.\n' ...
-         '  %s'], slx, err.message);
+         '  %s'], tmp, err.message);
 end
 
 save_system(model, slx);

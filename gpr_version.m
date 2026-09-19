@@ -12,5 +12,7 @@ function v = gpr_version()
 %     1.3  B10 persistent-cache coder fix, window baked in (81)
 %     1.4  version stamp printed by validate_package / gpr_realistic_main
 %     1.5  coder type stability (B11/B12), name-based chart I/O stamping
-v = '1.5';
+%     1.6  offline MATLAB-Coder check in validate_package; unfinished models
+%          parked in tempdir; fixes merged into main
+v = '1.6';
 end

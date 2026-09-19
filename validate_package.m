@@ -26,6 +26,7 @@ function v = validate_package(varargin)
 
 p = inputParser();
 addParameter(p, 'build', false);
+addParameter(p, 'codegen', false);
 parse(p, varargin{:});
 opt = p.Results;
 
@@ -233,6 +234,49 @@ if opt.build
     end
 else
     v = note(v, 'Model build not requested (''build'', true to include it).');
+end
+
+% ------------------------------------- optional: MATLAB Coder parse check
+% This is the same parser Simulink runs on every MATLAB Function block, but
+% offline and per block, so a Coder-level type error is caught without ever
+% opening Simulink.  Needs MATLAB Coder; skipped silently without it.
+if opt.codegen
+    if isempty(which('codegen'))
+        v = note(v, 'codegen requested but MATLAB Coder is not installed - skipped.');
+    else
+        cfg = cfgs.A;
+        io = gpr_block_io_sizes(cfg);
+        sp = gpr_pipeline_spec(cfg);
+        wd = fullfile(tempdir, 'gpr_codegen_check');
+        if ~exist(wd, 'dir'), mkdir(wd); end
+        for sec = {'rf', 'dsp'}
+            S = sp.(sec{1});
+            for j = 1:numel(S.blocks)
+                b = S.blocks{j};
+                nm = ['cgchk_' lower(b.name)];
+                ok = true; msg = '';
+                try
+                    gpr_compile_script(feval(b.gen, cfg), nm, wd);
+                    e = io.(b.name);
+                    args = cell(1, numel(e.in_sz));
+                    for q = 1:numel(e.in_sz)
+                        base = 1;
+                        if strcmp(e.in_cx{q}, 'Complex')
+                            base = complex(1);
+                        end
+                        args{q} = coder.typeof(base, e.in_sz{q}, false(e.in_sz{q}));
+                    end
+                    codegen(nm, '-args', args, '-o', fullfile(wd, 'out'));
+                catch ME
+                    ok = false; msg = ME.message;
+                end
+                v = check(v, ok, sprintf('mode A: %s parses under MATLAB Coder (%s)', ...
+                    b.name, msg));
+            end
+        end
+    end
+else
+    v = note(v, 'MATLAB Coder parse check not requested (''codegen'', true).');
 end
 
 % ------------------------------------------------------------- smoke run

@@ -28,12 +28,31 @@ B06_RX            TP06 (+noise)  B13_Detection    TP13
 B07_ADC           TP07 (+noise)  B14_Report       TP14  -> Final_Report_Log
 ```
 
+## Getting the current version (avoids stale extracts)
+
+The package prints its version on every run (`gpr_version`, the
+`validate_package` banner, `gpr_realistic_main`). If a log shows an older
+version than the latest tag, the folder on disk is an old extract. The
+sure-fire way to get the current tree from inside MATLAB:
+
+```matlab
+z = fullfile(tempdir, 'GPM-latest.zip');
+websave(z, 'https://codeload.github.com/enigmafarsco-lang/GPM/zip/refs/heads/main');
+d = fullfile(tempdir, 'GPM-latest');
+if exist(d, 'dir'), rmdir(d, 's'); end
+unzip(z, d);
+restoredefaultpath; rehash toolboxcache;
+addpath(fullfile(d, 'GPM-main'));
+gpr_version          % must match the latest release tag
+```
+
 ## Quick start
 
 ```matlab
 cd GPM                      % the folder you cloned or unzipped
 addpath(pwd);               % put it on the MATLAB path
 validate_package            % static checks, no Simulink needed
+validate_package('codegen', true)   % + parse all 14 blocks under MATLAB Coder
 test_gpr_package            % functional suite (~2 min, both modes)
 
 res = gpr_realistic_main('mode', 'A');   % UAV-mounted, 0.5-3 GHz, shallow
