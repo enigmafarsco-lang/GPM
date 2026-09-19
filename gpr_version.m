@@ -11,5 +11,6 @@ function v = gpr_version()
 %     1.2  MATLAB-legal map indexing, path-shadow guard (80)
 %     1.3  B10 persistent-cache coder fix, window baked in (81)
 %     1.4  version stamp printed by validate_package / gpr_realistic_main
-v = '1.4';
+%     1.5  coder type stability (B11/B12), name-based chart I/O stamping
+v = '1.5';
 end
