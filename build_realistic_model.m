@@ -420,19 +420,23 @@ for k = 1:numel(ds)
     if p < 1 || p > numel(szs)
         continue;
     end
+    % Failures here must be VISIBLE: a silently unstamped port is exactly
+    % how the "complex into non-complex" and size-mismatch errors returned.
     try
         ds(k).DataType = 'double';
-    catch
+    catch ME
+        warning('GPR:build:stamp', '%s: DataType stamp failed: %s', ds(k).Name, ME.message);
     end
     try
         ds(k).Complexity = cxs{p};
-    catch
+    catch ME
+        warning('GPR:build:stamp', '%s: Complexity stamp failed: %s', ds(k).Name, ME.message);
     end
-    set_size(ds(k), szs{p});
+    set_size(ds(k), szs{p}, ds(k).Name);
 end
 end
 
-function set_size(d, sz)
+function set_size(d, sz, nm)
 forms = {};
 if isequal(sz, [1 1])
     forms{end+1} = '1';
@@ -446,4 +450,5 @@ for k = 1:numel(forms)
     catch
     end
 end
+warning('GPR:build:stamp', '%s: Size stamp failed for [%d %d].', nm, sz(1), sz(2));
 end

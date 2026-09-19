@@ -82,9 +82,61 @@ for sec = {'rf', 'dsp'}
                 incx{q} = 'Real';
             end
         end
+        % The analytic table is only the fallback; the authoritative sizes
+        % and complexities are PROBED: run the compiled block once on typed
+        % dummy inputs and stamp exactly what it produces.  A hand table can
+        % disagree with the script (it did, twice); a probe cannot.
+        [psz, pcx] = probe_block(b, cfg, insz, incx, numel(osz(b.name)));
+        if isempty(psz)
+            psz = osz(b.name);
+            pcx = ocx(b.name);
+        end
         % wrap the cells: struct() would otherwise distribute them
         io.(b.name) = struct('in_sz', {insz}, 'in_cx', {incx}, ...
-            'out_sz', {osz(b.name)}, 'out_cx', {ocx(b.name)});
+            'out_sz', {psz}, 'out_cx', {pcx}, ...
+            'table_sz', {osz(b.name)}, 'table_cx', {ocx(b.name)});
     end
+end
+end
+
+function [psz, pcx] = probe_block(b, cfg, insz, incx, nout)
+% Run the generated block script once on ones() inputs of the wired sizes
+% and record the true size/complexity of every output.  An empty return
+% means the probe failed and the caller keeps the analytic table.
+psz = {};
+pcx = {};
+try
+    wd = fullfile(tempdir, 'gpr_io_probe');
+    if ~exist(wd, 'dir'), mkdir(wd); end
+    nm = ['iopr_' lower(b.name)];
+    fh = gpr_compile_script(feval(b.gen, cfg), nm, wd);
+    args = cell(1, numel(insz));
+    for q = 1:numel(insz)
+        if strcmp(incx{q}, 'Complex')
+            % isreal() tests VALUES, not types: the dummy must carry a
+            % non-zero imaginary part AND vary across traces, because
+            % trace-invariant components are exactly what B11 removes by
+            % design (a constant dummy would probe a complex path as real)
+            r = insz{q}(1); c = insz{q}(2);
+            args{q} = ones(r, c) + 0.5i ...
+                + 0.01*repmat(mod(1:c, 3), r, 1) ...
+                + 0.01i*repmat(mod(1:c, 2), r, 1);
+        else
+            args{q} = ones(insz{q}(1), insz{q}(2));
+        end
+    end
+    outs = cell(1, nout);
+    [outs{1:nout}] = fh(args{:});
+    for q = 1:nout
+        psz{q} = size(outs{q}); %#ok<AGROW>
+        if isreal(outs{q})
+            pcx{q} = 'Real'; %#ok<AGROW>
+        else
+            pcx{q} = 'Complex'; %#ok<AGROW>
+        end
+    end
+catch
+    psz = {};
+    pcx = {};
 end
 end

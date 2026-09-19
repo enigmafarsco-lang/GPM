@@ -16,5 +16,9 @@ function v = gpr_version()
 %          parked in tempdir; fixes merged into main
 %     1.7  ADC SQNR uses the full-scale-sine law 6.02*ENOB+1.76 dB; explicit
 %          reshape of noise_std (review round 2026-09)
-v = '1.7';
+%     1.8  EMPIRICAL I/O probe: chart stamps come from running each block on
+%          typed dummy inputs, so size/complexity stamps can never disagree
+%          with the script again; single-assignment noise_std; loud stamp
+%          warnings; release fingerprints in validate_package
+v = '1.8';
 end

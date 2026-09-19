@@ -172,6 +172,7 @@ for m = 1:numel(modes)
     ok = true; msg = '';
     try
         io = gpr_block_io_sizes(cfg);
+        if strcmp(tag, 'A'), ioA = io; end
         sp2 = gpr_pipeline_spec(cfg);
         for sec = {'rf', 'dsp'}
             S = sp2.(sec{1});
@@ -196,6 +197,43 @@ for m = 1:numel(modes)
     end
     v = check(v, ok, sprintf('mode %s: analytic I/O size table matches spec (%s)', tag, msg));
 end
+
+% ------------------------- release fingerprints (mixed-vintage detection)
+% An extract that overlays a new zip on an old folder leaves some files at
+% the old version while gpr_version claims the new one; these markers are
+% the fixes themselves, so a missing marker means a stale file.
+fp = { 'code_background', 'A = complex(rp)',      1; ...
+       'code_migration',  'acc = complex(0)',     1; ...
+       'code_adc',        'snr_db = 6.02',         1; ...
+       'code_adc',        'noise_std = reshape',  0; ...
+       'code_rangeproc',  'w = [',                 1 };
+ok = true; msg = '';
+for k = 1:size(fp, 1)
+    scr = feval(fp{k,1}, cfgs.A);
+    has = ~isempty(strfind(scr, fp{k,2})); %#ok<STREMP>
+    if has ~= logical(fp{k,3})
+        ok = false;
+        msg = sprintf('%s %s marker ''%s''', msg, fp{k,1}, fp{k,2});
+    end
+end
+v = check(v, ok, sprintf('release fingerprints present (%s)', msg));
+
+% --------------------- probed I/O must agree with the analytic table
+ok = true; msg = '';
+for kk = 1:numel(gens)
+    bn = blk_of_gen(gens{kk});
+    if isempty(bn), continue; end
+    e = ioA.(bn);
+    for q = 1:numel(e.out_sz)
+        if ~isequal(e.out_sz{q}, e.table_sz{q}) || ~strcmp(e.out_cx{q}, e.table_cx{q})
+            ok = false;
+            msg = sprintf('%s %s: probe [%dx%d %s] vs table [%dx%d %s];', msg, bn, ...
+                e.out_sz{q}(1), e.out_sz{q}(2), e.out_cx{q}, ...
+                e.table_sz{q}(1), e.table_sz{q}(2), e.table_cx{q});
+        end
+    end
+end
+v = check(v, ok, sprintf('probed I/O equals analytic table (%s)', msg));
 
 % ------------------------------------------- generated scripts: coder-safe
 % A persistent variable inside a MATLAB Function block is a parse error for
@@ -320,4 +358,19 @@ end
 
 function v = note(v, label)
 v.lines{end+1} = sprintf('  --    %s', label); %#ok<AGROW>
+end
+
+function bn = blk_of_gen(gen)
+% Map a generator name to its block name through the mode-A spec.
+sp = gpr_pipeline_spec(config_mode_A_uav_shallow());
+bn = '';
+for sec = {'rf', 'dsp'}
+    S = sp.(sec{1});
+    for j = 1:numel(S.blocks)
+        if strcmp(S.blocks{j}.gen, gen)
+            bn = S.blocks{j}.name;
+            return;
+        end
+    end
+end
 end
