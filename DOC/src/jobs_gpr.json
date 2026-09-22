@@ -1,0 +1,17 @@
+[
+ {"dsl":"gpr_algo_book.txt","figs":"figs_gpr",
+  "out":"out/GPR_Algorithm_Design_Book_v1.0.docx",
+  "title":"GPR SFCW Digital Twin - Algorithm Design Book",
+  "subtitle":"Complete algorithm reference of the GPM package: blocks B01-B14, physics, equations, configurations, validation architecture (package v1.8)",
+  "docnum":"GPM-ALG-001",
+  "meta":[["Document number","GPM-ALG-001"],["Revision","1.0"],["Date","2026-09-22"],
+          ["Package version","GPM v1.8 (83 checks, 12 tests)"],
+          ["Companion","GPM_MATLAB_Help_Guide (GPM-HELP-002), GPV repository (bit-exact RTL)"]]},
+ {"dsl":"gpr_help_guide.txt","figs":"figs_gpr",
+  "out":"out/GPM_MATLAB_Help_Guide_v1.0.docx",
+  "title":"GPM MATLAB Help Guide",
+  "subtitle":"File-by-file help, configuration reference, recipes and troubleshooting for the GPR digital twin package v1.8",
+  "docnum":"GPM-HELP-002",
+  "meta":[["Document number","GPM-HELP-002"],["Revision","1.0"],["Date","2026-09-22"],
+          ["Package version","GPM v1.8"],["Companion","GPM-ALG-001 algorithm book"]]}
+]

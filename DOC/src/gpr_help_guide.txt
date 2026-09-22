@@ -1,0 +1,232 @@
+# How to use this guide
+This guide is the operator and developer help for every MATLAB file in the GPM package (version 1.8): what each file does, its exact signature, what it returns, a worked call, and the pitfalls that historically cost people time. It is organised the way the package is organised: configuration files first (they define a survey), then the fourteen code generators (the algorithm), then the core helpers, then the runners and builders, then the validators. Recipes and troubleshooting close the guide.
+FIG: gpr_workflow.png | The normal path through the package: config, check, run, extract, display - with the validators gating every change.
+## Package map (every file, one line)
+| File | Purpose |
+| config_mode_A_uav_shallow.m | mode A config struct: UAV shallow 0.5-3 GHz |
+| config_mode_B_ground_deep.m | mode B config struct: ground-coupled deep 10-100 MHz |
+| code_environment.m | B01 generator: survey geometry |
+| code_waveform.m | B02 generator: SFCW tone comb |
+| code_tx.m | B03 generator: TX chain, normalised output |
+| code_channel.m | B04 generator: two-way soil propagation |
+| code_coupling.m | B05 generator: TX-RX leakage |
+| code_rx.m | B06 generator: RX chain + thermal noise level |
+| code_adc.m | B07 generator: ENOB quantisation, auto-range |
+| code_averaging.m | B08 generator: coherent integration sqrt(N) |
+| code_calibration.m | B09 generator: divide known system response |
+| code_rangeproc.m | B10 generator: Kaiser + zero-pad IFFT |
+| code_background.m | B11 generator: component-wise median clutter |
+| code_migration.m | B12 generator: Kirchhoff coherent migration |
+| code_detection.m | B13 generator: 2-D CFAR (log/mean) |
+| code_report.m | B14 generator: 8-connected cluster report |
+| gpr_pipeline_spec.m | single source of truth: graph, params, wiring |
+| gpr_check_config.m | validate cfg + add derived fields |
+| gpr_cfg_value.m | optional-field reader with default |
+| gpr_axes.m | derived frequency/range/cross-range axes |
+| gpr_block_io_sizes.m | analytic port sizes/types per block |
+| gpr_parse_script.m | read port signature of a generated script |
+| gpr_compile_script.m | make a generated script callable |
+| gpr_range_window.m | spectral taper (kaiser/rectangular/...) |
+| gpr_pulse_width.m | pulse broadening, null width, guard bins |
+| gpr_extract_results.m | test points -> results struct |
+| gpr_tp_from_simout.m | collect TP01-TP14 after a Simulink run |
+| run_pipeline_reference.m | run the whole chain without Simulink |
+| build_realistic_model.m | build GPR_Realistic.slx from cfg |
+| gpr_realistic_main.m | end-to-end runner with engine choice |
+| gpr_realistic_gui.m | B-scan / detection / profile display |
+| validate_package.m | 83 static checks (+optional build) |
+| test_gpr_package.m | 12 functional tests |
+| check_physics_feasibility.m | independent physics audit of cfg |
+| gpr_path_sanity.m | detect a shadowing second installation |
+| gpr_version.m | release stamp printed by every runner |
+| soil_permittivity.m | shared frequency-dependent soil model |
+
+# Installation and first run
+## Getting a clean path
+Unzip or clone the package into one folder and put that folder on the MATLAB path - once. A second copy anywhere earlier on the path (old unzip, saved path, support toolbox) makes MATLAB mix versions and produce errors that cannot be reproduced from the sources you are reading. gpr_path_sanity() lists every core function that does NOT resolve into its own folder; the fix it prints is restoredefaultpath; rehash toolboxcache; addpath(<this dir>).
+FIG: gpr_path.png | Path shadowing: the resolver takes the first match, so a stale copy silently wins; gpr_path_sanity catches it in one call.
+## First five commands
+1. addpath('<package folder>')
+2. gpr_version() - confirm 1.8; every runner prints it too
+3. v = validate_package() - 83 checks, no Simulink needed
+4. t = test_gpr_package('quick', 1) - functional suite without the slow mode-B run
+5. res = gpr_realistic_main('mode', 'A', 'engine', 'reference') - end-to-end in plain MATLAB
+## Simulink and Octave
+With Simulink installed, gpr_realistic_main() defaults to the model engine and build_realistic_model(cfg) (re)generates GPR_Realistic.slx; validate_package('build', true) also builds and runs the MATLAB-Coder offline check. Without Simulink - including GNU Octave - the reference engine runs the identical generated script text, so everything except .slx building works there.
+
+# Configuration files and field reference
+## The two shipped configs
+config_mode_A_uav_shallow() and config_mode_B_ground_deep() return the full cfg struct and call gpr_check_config before returning, so a hand-edited config passed through gpr_check_config is checked exactly like a shipped one. References: Garcia-Fernandez et al. 2018 (mode A), Annan 2005 (mode B).
+## Field reference
+| Field | Meaning | Mode A | Mode B |
+| mode / description / reference | identity strings | A_UAV_Shallow | B_Ground_Deep |
+| f_start / f_stop | band edges [Hz] | 0.5e9 / 3e9 | 10e6 / 100e6 |
+| n_tones | frequency steps | 256 | 512 |
+| tone_dwell_time | s per tone (sets noise BW) | 50e-6 | 200e-6 |
+| uav_altitude | standoff above ground [m] | 0.5 | 0.02 |
+| uav_speed | platform speed [m/s] | 0.5 | 0.1 |
+| scan_length / n_positions | profile length [m] / traces | 10 / 200 | 20 / 200 |
+| n_averages | coherent sweeps per trace | 32 | 128 |
+| antenna_type | descriptive | Vivaldi | Loaded_Bowtie |
+| tx_rx_separation | antenna spacing [m] | 0.2 | 1.5 |
+| beam_half_angle_tan | tan(half beamwidth) | tan(pi/6) | tan(pi/6) |
+| footprint_min | near-field footprint floor [m] | 0.30 | 0.30 |
+| target_depths / target_x / target_rcs | parallel target arrays | 4 targets 0.1-0.8 m | 5 targets 3-15 m |
+| depth_min / depth_max | CFAR/imaging window [m] | 0.05 / 1.0 | 2 / 18 |
+| soil_moisture / soil_conductivity | mv [m3/m3], sigma [S/m] | 0.08 / 0.005 | 0.05 / 0.001 |
+| rx_cable_delay | calibrated delay [s] | 5e-9 | 12e-9 |
+| adc_enob | converter ENOB | 14 | 16 |
+| n_ifft | zero-padded IFFT length | 2048 | 4096 |
+| kaiser_beta | range taper beta | 8 | 8 |
+| range_window | taper family | kaiser | kaiser |
+| tx_taper_percent | transmit edge taper | 0 | 0 |
+| cfar_pfa / cfar_estimator | false-alarm budget / estimator | 1e-6 / mean | 1e-5 / log |
+| cfar_guard / cfar_train | guard / training cells | 8 / 16 | 8 / 16 |
+| bg_remove_modes | background modes (1 = median) | 1 | 1 |
+| migration_aperture | aperture = k * depth | 1.0 | 1.0 |
+| RF chain levels | dac_power_d, pa_gain_d, pa_p1d, pa_backoff_d, tx_cable_loss_d, tx_antenna_gain_d, rx_antenna_gain_d, rx_cable_loss_d, lna_gain_d, system_nf_d, antenna_coupling_d | per file | per file |
+## Rules the checker enforces
+gpr_check_config errors on mismatched target vector lengths, n_ifft < n_tones, non-physical soil values, non-positive geometry, and fills derived fields (soil permittivity at band centre, bin sizes, EIRP, ...). New optional fields must be read through gpr_cfg_value(cfg,'field',default) inside generators so old configs keep working.
+
+# The fourteen code generators
+Each code_*.m is a generator: called with cfg it returns the MATLAB Function block script text whose primary function is fcn with the port signature documented below. You rarely call them directly - run_pipeline_reference and build_realistic_model do - but every test and every Simulink block runs exactly this text.
+## code_environment.m (B01)
+Ports: (altitude, scan_length) -> env [3 x n_positions]. Builds cross-range, along-track (zero) and height rows. Pitfall: downstream code reads positions only from this matrix; never recompute spacing elsewhere.
+## code_waveform.m (B02)
+Ports: (f_start, f_stop) -> tx [n_tones x 1]. Flat comb by default; raised-cosine edge taper only if tx_taper_percent > 0 (double tapering with B10's Kaiser broadens the pulse twice).
+## code_tx.m (B03)
+Ports: (tx_in, pa_gain_d) -> tx_out [n_tones x 1], peak-normalised. Absolute power belongs to B04's EIRP; scaling here is the historical double-count bug.
+## code_channel.m (B04)
+Ports: (env, tx, moisture, sigma, tgt_d, tgt_x, tgt_rcs, f_start, f_stop) -> ch [n_tones x n_positions]. Surface bounce plus one diffraction tail per target with soil-leg attenuation and footprint weighting; soil non-dispersive by stated assumption.
+## code_coupling.m (B05)
+Ports: (tx_in, coupling_dB, ch_in) -> y. Air-path phase exp(-j 2 pi f sep/c); isolation already includes free-space spreading.
+## code_rx.m (B06)
+Ports: (y, gains/losses/delay...) -> rx, noise_std [n_positions x 1]. Bakes the analog response B09 removes; noise level is output here and injected only in B08.
+## code_adc.m (B07)
+Ports: (rf_in, enob, n_thermal) -> iq, noise_std. Auto-range assumption: quantisation step from mean trace power; SQNR law 6.02*ENOB+1.76 dB.
+## code_averaging.m (B08)
+Ports: (iq, noise_std, n_avg) -> avg. Signal divided by N, noise injected at sigma/sqrt(N). Never add per-sweep noise copies here.
+## code_calibration.m (B09)
+Ports: (raw, f_start, f_stop) -> cal. Divides cable delay + ripple; must stay paired with code_rx's response model.
+## code_rangeproc.m (B10)
+Ports: (u, beta) -> rp [n_ifft x n_positions] complex. Kaiser from gpr_range_window, zero-pad to n_ifft, IFFT along frequency. Persistent cache follows the Coder rule: persistent read only inside the isempty guard.
+## code_background.m (B11)
+Ports: (rp, modes) -> cleaned. Component-wise MEDIAN across positions for modes=1. The comments carry the mean-versus-median bug report; read them before touching this block.
+## code_migration.m (B12)
+Ports: (bs, f_start, f_stop, moisture, sigma, depth_max, scan_len, alt) -> mig [n_ifft x n_positions] real >= 0. Kirchhoff sum over the hyperbola within aperture = migration_aperture * depth; migration_coherent selects complex (default) versus magnitude imaging.
+## code_detection.m (B13)
+Ports: (mig, guard, train, pfa, estimator, depth gate) -> det mask. 'log' geometric-mean CFAR (robust) or 'mean' CA-CFAR (sparse scenes); alpha from pfa and training count; guard must cover the compressed pulse (gpr_pulse_width).
+## code_report.m (B14)
+Ports: (det, axes) -> rep [6 x 1]. 8-connected union-find clusters; empty-scene guards return zeros, not NaN.
+
+# Core helpers
+## gpr_pipeline_spec.m
+spec = gpr_pipeline_spec(cfg): parameters, constant blocks, block lists and wiring for both subsystems, outport sources. This is the file to edit when the graph changes; builders and runners follow it.
+## gpr_check_config.m / gpr_cfg_value.m
+Validation plus derived fields; optional-field reads with defaults for backwards compatibility.
+## gpr_axes.m
+AX = gpr_axes(cfg): .freq tone frequencies, .df spacing, range and cross-range axes - use these for plotting instead of hand-made vectors.
+## gpr_block_io_sizes.m
+io = gpr_block_io_sizes(cfg): analytic [rows cols] and Real/Complex per port per block, in spec wiring order. Exists because MATLAB Function block output sizes must be declared; the stamps actually written into charts come from the empirical probe (see validators).
+## gpr_parse_script.m / gpr_compile_script.m
+INFO = gpr_parse_script(SCRIPT): fname ('fcn'), output/input port names, counts, local function names. [FH, INFO] = gpr_compile_script(SCRIPT, OUT_NAME, WORKDIR): writes the script as a callable function and returns a handle - the mechanism that lets the reference engine execute exactly the Simulink block text.
+## gpr_range_window.m / gpr_pulse_width.m
+w = gpr_range_window(NAME, N, BETA): the spectral taper. [BROADENING, NULL_BINS, GUARD_BINS] = gpr_pulse_width(NAME, N, BETA, N_IFFT): measured cost of the taper and the minimum CFAR guard in IFFT bins - cite these numbers when changing cfar_guard.
+## gpr_extract_results.m / gpr_tp_from_simout.m
+res = gpr_extract_results(tp, cfg, feasibility) accepts plain arrays (reference engine) or Simulink timeseries logs (tp = gpr_tp_from_simout(out, cfg), or OUT = [] to read base workspace) and returns the unified results struct with named stages (.env .tx .channel .rx .adc .avg .cal .rp .bg .mig .det .rep ...) plus .cfg .feasibility .ax.
+## soil_permittivity.m
+[EPS_R, EPS_I, ALPHA, BETA, V] = soil_permittivity(F, MOISTURE, SIGMA): the shared medium model; B04, B12 and the physics audit all call it.
+
+# Runners and builders
+## run_pipeline_reference.m
+res = run_pipeline_reference(cfg): compiles every generator's script to a temp function and runs the spec wiring in order; base MATLAB or Octave; the reference implementation of the model.
+## build_realistic_model.m
+model = build_realistic_model(cfg, 'model_name', ..., 'folder', ..., 'open', ..., 'overwrite', ..., 'verbose', ...): builds GPR_Realistic.slx with MATLAB Function blocks, TP scopes and loggers; unfinished models park in tempdir so a failed build never leaves a half .slx behind.
+## gpr_realistic_main.m
+res = gpr_realistic_main('mode', 'A'|'B', 'engine', 'simulink'|'reference', ...): end-to-end with engine choice (Simulink default when installed); prints gpr_version; returns the results struct.
+## gpr_realistic_gui.m
+gpr_realistic_gui(res, 'profile_x', 6.0, 'show', 'detection'): B-scan, detection overlay and depth profile at a chosen cross-range (default strongest detection).
+FIG: gpr_tpmap.png | TP01-TP14 in both engines: scopes + workspace loggers in Simulink, struct fields in the reference engine.
+
+# Validators
+## validate_package.m - 83 static checks
+v = validate_package() or validate_package('build', true). Checks per configuration: file presence, function-name/file-name agreement, script parse and compile, empirical I/O probe agreement, spec wiring, config guards, release fingerprints, path shadow; optional Simulink build and MATLAB-Coder offline check. Read v's failure list top-down: the first failing category usually explains the rest.
+## test_gpr_package.m - 12 functional tests
+t = test_gpr_package() or ('quick', 1). T01 soil model, T02 axes, T03 config guards, T04 waveform, T05 calibration, T06 background, T07 migration focus, T08 CFAR false alarms, T09 report labelling, T10 test-point names, T11 end-to-end mode A, T12 end-to-end mode B. t.ok true means all passed; a single failing T-name points at one block or one contract.
+## check_physics_feasibility.m
+f = check_physics_feasibility(cfg, 'verbose', false): independent first-principles audit; its verdict travels in res.feasibility. Consult it before believing a detection failure: infeasible cfg means design error, feasible cfg with failure means algorithm bug.
+## gpr_path_sanity.m and gpr_version.m
+off = gpr_path_sanity(): one line per core function resolving outside this folder. v = gpr_version(): '1.8'; printed by validate_package and gpr_realistic_main so stale installs identify themselves immediately.
+
+# Recipes
+## Run mode B end to end and look at it
+cfg = config_mode_B_ground_deep(); res = gpr_realistic_main('mode','B'); gpr_realistic_gui(res)
+## Rebuild the Simulink model after editing a generator
+edit code_*.m; build_realistic_model(config_mode_A_uav_shallow(), 'overwrite', true); validate_package('build', true)
+## Compare engines
+r1 = gpr_realistic_main('engine','reference'); r2 = gpr_realistic_main('engine','simulink'); max(abs(r1.rep - r2.rep))
+## Add an optional config field
+add it to configs; read it in generators via gpr_cfg_value(cfg,'new_field',default); extend gpr_check_config derived fields if physics depends on it; add a validate_package check and a test.
+## Add a block
+add generator code_b15_*.m; register block, wiring and test point in gpr_pipeline_spec.m; extend gpr_block_io_sizes and the TP naming in gpr_tp_from_simout/gpr_extract_results; add T13-style test; bump gpr_version history.
+## Offline Coder check without a full build
+validate_package('build', true) on a Simulink machine; the v1.6 addition runs the MATLAB-Coder check and parks unfinished models in tempdir.
+
+# Troubleshooting
+| Symptom | Cause | Fix |
+| obscure Coder error, one rule per round | stale chart stamps vs script text | update package to >= 1.8 (empirical probe); rebuild model |
+| results differ from colleague's | two installations on path | gpr_path_sanity(); restoredefaultpath; addpath once |
+| model opens with missing blocks | half-written .slx from failed build | delete .slx; build_realistic_model(...,'overwrite',true) |
+| deep targets missing in mode B | mean background or missing Kaiser | keep bg_remove_modes=1 median and range_window='kaiser' |
+| CFAR reports nothing at depth | guard smaller than compressed pulse | cfar_guard >= gpr_pulse_width GUARD_BINS |
+| noise floor falls by N not sqrt(N) | per-sweep noise added in B08 | use shipped B06/B08 contract |
+| config rejected at load | mismatched target vectors or n_ifft < n_tones | read gpr_check_config message id; fix arrays |
+| Octave: Simulink functions missing | expected | use engine 'reference' |
+| version banner older than repo | stale copy or saved path | gpr_version(); fix path |
+
+# Worked examples, file by file
+Monospace lines below are copy-pasteable; outputs described in comments match package v1.8.
+EQ: cfg = config_mode_A_uav_shallow();          % checked + derived fields added
+EQ: cfg = gpr_check_config(cfg, 'Mode A');      % re-check a hand-edited struct
+EQ: ax = gpr_axes(cfg);                         % .freq .df .range .x axes
+EQ: io = gpr_block_io_sizes(cfg);               % per-block port sizes/types
+EQ: [fh, info] = gpr_compile_script(code_background(cfg), 'b11_tmp', tempdir);
+EQ: rp = fh(cal_matrix, 1);                     % run one block standalone
+EQ: res = run_pipeline_reference(cfg);          % whole chain, no Simulink
+EQ: res = gpr_realistic_main('mode','B');       % Simulink if installed
+EQ: tp = gpr_tp_from_simout(out, cfg);          % after a Simulink run
+EQ: res2 = gpr_extract_results(tp, cfg, f);     % unify engines
+EQ: gpr_realistic_gui(res, 'profile_x', 4.0);   % depth profile at x = 4 m
+EQ: v = validate_package();                     % 83 checks, v.ok true
+EQ: t = test_gpr_package('quick', 1);           % T01-T11, skip slow B e2e
+EQ: f = check_physics_feasibility(cfg);         % first-principles audit
+EQ: off = gpr_path_sanity();                    % {} when path is clean
+EQ: [b, n, g] = gpr_pulse_width('kaiser', 256, 8, 2048);  % taper cost + guard
+EQ: w = gpr_range_window('kaiser', 256, 8);     % the taper itself
+EQ: [er, ei, al, be, v] = soil_permittivity(1e9, 0.08, 0.005);
+EQ: model = build_realistic_model(cfg, 'open', false);   % (re)build .slx
+## Reading a results struct
+res.cfg / res.feasibility / res.ax give context; res.env ... res.rep give the fourteen stages; res.rep(2) is the headline number (distinct detections). Every field exists in both engines, which is what makes engine-comparison a one-line check.
+## Version history at a glance
+| Rev | What landed | User-visible effect |
+| 1.0 | validated contract | spec + generators + TPs |
+| 1.1 | chart stamps, TP scopes | model builds reliably |
+| 1.2 | map indexing, path guard | field failures closed |
+| 1.3 | B10 cache rule | Coder-clean builds |
+| 1.4 | version banner | stale installs visible |
+| 1.5 | type stability, name stamps | fewer Coder rounds |
+| 1.6 | offline Coder check | validation without build |
+| 1.7 | SQNR law, reshape | honest margins |
+| 1.8 | empirical probe | stamps can never drift |
+
+# FAQ and glossary
+- Can I run without Simulink? Yes: engine 'reference' executes the identical generated text.
+- Is the .slx shipped? No: it is generated by build_realistic_model so model and generators cannot drift.
+- Where do golden RTL vectors come from? The GPV repository generates them from these code_*.m sources; GPM stays MATLAB/Simulink-only.
+- What does a stamp warning mean? A chart's declared I/O differs from the empirical probe; rebuild the model before trusting anything else.
+| Term | Meaning |
+| generator | code_*.m file returning block script text |
+| stamp | declared chart I/O size/complexity |
+| empirical probe | running blocks on typed dummies to measure stamps |
+| TP | test point TP01-TP14 |
+| reference engine | run_pipeline_reference execution path |

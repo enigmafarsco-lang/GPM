@@ -1,0 +1,331 @@
+# Document map, scope and conventions
+This book is the complete algorithm reference of the GPM package: a scripted, fully parameterised digital twin of a stepped-frequency continuous-wave (SFCW) ground-penetrating radar. It describes every algorithm block B01-B14 exactly as implemented in the code_*.m generators, the physics each block embodies, the equations it evaluates, the numerical decisions that make it correct in fixed simulation practice, the two shipped configurations (mode A UAV shallow, mode B ground-coupled deep), and the validation architecture that proves the package (83 static checks, 12 functional tests, empirical I/O probe, release fingerprints).
+| Part | Sections | Coverage |
+| I | 2-4 | pipeline topology, execution engines, survey geometry |
+| II | 5-12 | RF front end algorithms B01-B07 with physics and equations |
+| III | 13-19 | digital processing algorithms B08-B14 with physics and equations |
+| IV | 20-22 | configurations A/B, performance equations, physics feasibility audit |
+| V | 23-26 | validation architecture, Simulink model, operator workflow, design lessons |
+| App | A-C | block I/O tables, equation collection, glossary |
+Conventions: [validated] marks results produced by the package's own validation runs; [derived] marks closed-form equations stated here; [simulated] marks figures produced by the seeded numpy mini-chain shipped with this book's generator (DOC/src), which re-implements the same algorithms at small scale for illustration only. The package sources remain the single source of truth; where prose and code could ever disagree, code wins and this book is regenerated.
+## Revision history
+| Rev | Date | Change |
+| 1.0 | 2026-09-22 | First issue against package version 1.8 (83 checks, 12 tests) |
+
+# Pipeline topology and the single source of truth
+## The fourteen blocks
+The chain is a directed graph of fourteen algorithm blocks in two subsystems. RF_Front_End synthesises what a real receiver would digitise: B01_Environment builds the survey geometry, B02_Waveform the stepped-frequency tone comb, B03_TX_Chain the normalised transmit waveform through DAC, predriver and soft-compressing PA, B04_Channel the two-way soil propagation with surface bounce and per-target diffraction tails, B05_Coupling the direct TX-RX leakage, B06_RX the receive chain with its analog system response and thermal noise level, B07_ADC the ENOB-limited quantisation. Digital_Processing turns samples into an operator report: B08_Averaging coherent integration, B09_Calibration division by the known system transfer function, B10_RangeProc tapered zero-padded IFFT range compression, B11_Background component-wise median clutter removal, B12_Migration Kirchhoff coherent focusing, B13_Detection two-dimensional CFAR, B14_Report connected-cluster reporting.
+FIG: gpr_pipeline.png | The fourteen blocks in their two subsystems with test points TP01-TP14; every block output is logged in both execution engines.
+## One spec, two engines
+Both execution paths are generated from gpr_pipeline_spec.m: build_realistic_model.m pastes each generated block script into a Simulink MATLAB Function block and wires the subsystems exactly as the spec says; run_pipeline_reference.m compiles the same script text to temporary function files (gpr_compile_script.m) and executes the chain in plain MATLAB or Octave. The two engines therefore cannot drift: they run the same characters of code, differ only in scheduler, and both log TP01-TP14.
+FIG: gpr_engines.png | Single source of truth feeding the Simulink builder and the reference runner; identical block text, identical test points.
+## Test points as the observability contract
+Each block output is observable: in Simulink as a visible Scope named TPnn_Scope (one input per output port) plus a To Workspace timeseries logger tpnn_<block> (tpNN_..._o2 for second ports); in the reference engine as same-named struct fields. gpr_extract_results.m accepts either form and returns one results struct, so every figure, check and export in the package is engine-agnostic.
+FIG: gpr_tpmap.png | TP01-TP14 logging contract: scopes and workspace loggers in Simulink, struct fields in the reference engine.
+
+# Survey geometry and environment (B01)
+## What the block computes
+B01_Environment converts two scalars (altitude, scan_length) into the [3 x n_positions] matrix of antenna phase-centre coordinates: cross-range x linearly spaced over the scan, along-track y identically zero for a 2-D profile, and height above the ground plane (the configured standoff: UAV altitude in mode A, skid clearance in mode B). Everything downstream that needs a position - channel slant ranges, migration apertures, B-scan axes - reads this matrix, never recomputes spacing.
+## Geometry conventions
+Depth is positive downward from the ground plane; target vectors (target_depths, target_x, target_rcs) are parallel arrays validated for equal length by gpr_check_config. The beam footprint enters B04 through beam_half_angle_tan and footprint_min: the illuminated patch at depth z is max(footprint_min, 2 z tan(half angle)), which weights each target's diffraction tail by the fraction of the beam that sees it.
+FIG: gpr_geometry.png | Survey geometry: traces along the scan at fixed standoff, targets as (x, depth) points with their diffraction tails sketched.
+| Quantity | Symbol | Source field |
+| cross-range grid | x[k] | scan_length / n_positions |
+| standoff height | h | uav_altitude |
+| beam footprint at depth | F(z) | beam_half_angle_tan, footprint_min |
+| target list | (d_t, x_t, rcs_t) | target_depths / target_x / target_rcs |
+
+# SFCW waveform principle (B02)
+## The tone comb
+The transmit spectrum is a comb of n_tones complex tones from f_start to f_stop with spacing df = (f_stop-f_start)/(n_tones-1). Each tone dwells tone_dwell_time seconds, which sets the receiver noise bandwidth 1/tone_dwell_time (20 kHz in mode A, 5 kHz in mode B) and therefore the thermal noise per tone. An optional raised-cosine edge taper (tx_taper_percent, default 0) trades range resolution for lower IFFT sidelobes at the transmit side; the default is zero because B10 applies the authoritative Kaiser taper after calibration, and double tapering would broaden the compressed pulse twice.
+FIG: gpr_tones.png | Tone train in time (one complex sample per dwell) and transmit spectrum amplitude with and without edge taper [simulated].
+## Range resolution and unambiguous range
+Two classical relations govern the frequency plan: the range cell after compression is c/(2 B n_soil) with B = f_stop-f_start, and the unambiguous range of the tone comb is c/(2 df). Mode A's 2.5 GHz band gives decimetre cells in soil; mode B's 512 tones over 90 MHz give df = 176 kHz and an unambiguous two-way range of about 850 m, comfortably beyond its 18 m depth window - the reason mode B can afford fine tone spacing.
+EQ: df = (f_stop - f_start)/(n_tones - 1) ;  R_unamb = c/(2 df) ;  delta_R = c/(2 B sqrt(eps_r))
+EQ: B_noise = 1/tone_dwell_time ;  T_sweep = n_tones * tone_dwell_time
+
+# Soil electromagnetics (soil_permittivity.m and B04)
+## The shared soil model
+soil_permittivity.m is the package-wide frequency-dependent soil model: at frequency f, volumetric moisture mv and bulk conductivity sigma it returns real permittivity eps_r from a Dobson-type mixing trend, imaginary part from bulk conductivity, field attenuation alpha in Np/m, phase constant beta and propagation velocity v. B04, B12 and check_physics_feasibility all call this one function, so attenuation, velocity and migration focusing can never disagree about the medium.
+FIG: gpr_soil.png | Illustrative Dobson-type trends: permittivity rises with moisture; attenuation rises with frequency and moisture - the physical reason deep surveying moves to 10-100 MHz.
+## Non-dispersive assumption and its consequence
+Within a configured band the model treats soil as non-dispersive: phase is linear in frequency with slope equal to travel time, so a target's two-way delay is a constant phase slope across the comb and range compression is exact. Dispersion would curve that phase and smear the compressed pulse; the package states the assumption explicitly in B04 rather than hiding it, and check_physics_feasibility audits whether the configured band/moisture pair keeps dispersion negligible.
+FIG: gpr_dispersion.png | Phase versus frequency: the linear (non-dispersive) law used by B04 against a dispersive strawman [simulated].
+## Attenuation and the depth limit
+Two-way field attenuation multiplies the target echo by exp(-2 alpha R_soil). With mode A's dry soil (mv 0.08, sigma 0.005 S/m) alpha stays small over 0.5-3 GHz for metre-scale paths; with moist soil the same band would attenuate the echo into the noise floor, which is exactly the failure check_physics_feasibility reports before anyone wastes a survey.
+EQ: E(R) ~ exp(-alpha R) ;  P_echo ~ rcs * exp(-2 alpha R_soil) / R^4   [radar-equation form used by B04]
+
+# Transmit chain model (B03)
+DAC, predriver and PA with soft compression at P1dB (pa_p1d, pa_backoff_d), then TX cable loss. The output is the normalised transmit waveform (peak amplitude 1); absolute radiated power is applied only in B04 through EIRP assembled from dac_power_d, gains and losses. Keeping normalisation and absolute power in different blocks is a deliberate fix: the previous version scaled twice, once in TX and once in the channel, and every level downstream was wrong by the PA gain.
+| Parameter | Field | Role |
+| DAC output power | dac_power_d | start of the level chain |
+| PA gain / P1dB / backoff | pa_gain_d, pa_p1d, pa_backoff_d | soft compression point |
+| TX cable loss | tx_cable_loss_d | level before antenna |
+| TX antenna gain | tx_antenna_gain_d | EIRP assembly in B04 |
+
+# Channel: two-way propagation, surface bounce, diffraction tails (B04)
+## What a trace contains
+For each position the channel response is the sum of (a) the specular air-soil bounce - the surface clutter every GPR A-scan shows - and (b) one diffraction tail per buried target, computed with the radar equation over the slant path: air leg from antenna to entry point, soil leg to the target and back, conductivity attenuation on the soil leg, and beam-footprint weighting. The soil leg uses velocity v from soil_permittivity, so target depth maps to phase slope consistently with migration.
+EQ: H_ch(f,k) = a_surf exp(-j 2 pi f 2 R_air/c) + sum_t a_t exp(-j 2 pi f (2 R_air,t/c + 2 R_soil,t/v))
+## Slant paths and hyperbolae
+Because R depends on |x_k - x_t|, each target traces a diffraction hyperbola in the (position, delay) plane - the signature B12 later collapses. The surface bounce is position-invariant for a level survey, which is precisely why B11 can estimate it as a rank-1 mode with a uniform right singular vector.
+FIG: gpr_ascan.png | One calibrated A-scan: coupling spike, surface return, then three target echoes above the noise floor [simulated].
+FIG: gpr_hyper.png | Diffraction hyperbolae R = sqrt(z^2 + (x-x_t)^2) for three targets: the raw signature migration must collapse.
+
+# Coupling: direct TX-RX leakage (B05)
+The leakage travels the antenna separation in air, carrying phase exp(-j 2 pi f sep/c), so it lands in the first range bins of every A-scan - exactly what real traces show. The isolation value antenna_coupling_d (negative dB) already includes free-space spreading between the antennas; the block adds the leakage coherently to the channel response. Because the separation is fixed, coupling is another position-invariant component and is removed together with the surface bounce by B11.
+| Quantity | Field | Note |
+| separation | tx_rx_separation | 0.2 m mode A, 1.5 m mode B |
+| isolation | antenna_coupling_d | includes free-space spreading |
+| phase law | exp(-j 2 pi f sep/c) | air path, first range bins |
+
+# Receive chain and the noise contract (B06)
+B06 models RX antenna, cable and LNA including the analog system response (cable delay rx_cable_delay plus passband ripple) that B09 later divides out; both blocks bake the same cfg values, so calibration is exact by construction - change the response model in one and you must change it in the other, and validate_package's generated-script checks exist partly to keep that pair honest.
+The second output is the input-referred thermal noise standard deviation per quadrature for one single sweep. It is computed here and injected only in B08, at its post-integration level. That split is the fix for the package's oldest noise bug: drawing fresh noise per tone and position in RX and again in averaging divided noise by N instead of sqrt(N) and double-counted signal.
+EQ: sigma_thermal = sqrt(k T0 B_noise F) / (signal-reference scaling) ;  injected in B08 as sigma/sqrt(n_averages)
+FIG: gpr_noise.png | Shape of the noise budget: thermal floor per dwell, RX/LNA gain, ADC SQNR headroom, and the sqrt(N) coherent gain [derived].
+
+# ADC: ENOB-limited quantisation with auto-ranging (B07)
+Ideal sampling plus quantisation noise from the effective number of bits. The converter is assumed auto-ranged to the incoming peak (a real receiver does this with attenuator/AGC), so the quantisation step derives from the mean received power of each trace, not from a fixed full scale. Since v1.7 the SQNR uses the full-scale-sine law 6.02*ENOB + 1.76 dB; the earlier peak-sine convention overstated headroom by 3 dB and made deep mode-B margins look safer than they were.
+FIG: gpr_enob.png | Full-scale-sine SQNR law with the two operating points: 14 bit mode A, 16 bit mode B (the extra bits buy deep dynamic range).
+| Quantity | Field | Mode A | Mode B |
+| ENOB | adc_enob | 14 | 16 |
+| noise output | noise_std | per-quadrature, single sweep | same contract |
+| auto-range assumption | - | step from mean trace power | same |
+
+# Coherent averaging (B08)
+The deterministic echo is identical in every sweep and survives the 1/N division unchanged; the noise is independent sweep to sweep and falls by sqrt(N). B08 therefore divides the summed signal by N and injects the single-sweep noise from B06 at level sigma/sqrt(N) - integration gain sqrt(N) in amplitude, never N. Mode A averages 32 sweeps (15 dB), mode B 128 sweeps (21 dB), buying back the attenuation of depth.
+FIG: gpr_gain.png | Correct coherent gain sqrt(N) against the historical N bug; the gap at n=128 is 21 dB of false confidence the old code created.
+EQ: y_avg = (1/N) sum_n y_n ;  sigma_avg = sigma_1 / sqrt(N)
+
+# Calibration: dividing out the known system response (B09)
+B09 divides the measured spectrum by the known system transfer function: cable delay plus modelled passband ripple. A real system obtains this from factory calibration against a reference reflector; the package models it in B06 and removes it here with identical cfg values, so the division is exact and the test T05 can verify it to machine precision. After calibration the only phase slopes left in a trace are propagation delays - which is what makes range compression and migration meaningful.
+FIG: gpr_cal.png | System ripple before and after the B09 division: the calibrated trace spectrum is flat where the hardware was not [simulated].
+
+# Range processing: taper, zero-pad, IFFT (B10)
+## Why a taper is mandatory here
+Range compression is an IFFT over the swept tones. An untapered (rectangular) spectrum has -13 dB range sidelobes decaying only as 1/delta; a strong shallow target leaves a sidelobe skirt that the migration sums coherently over its whole aperture, inflating the CFAR noise estimate around weak deep targets until they disappear. The Kaiser window (kaiser_beta = 8, about -58 dB sidelobes) removes the skirt at the price of a 1.79x mainlobe broadening - a price the package pays deliberately and documents.
+FIG: gpr_window.png | Rectangular versus Kaiser beta=8: taper shape and the compressed-pulse sidelobe floor it buys.
+FIG: gpr_rangecomp.png | The same trace compressed with and without taper: the rectangular skirt would be integrated coherently by migration [simulated].
+## Zero padding and bin accounting
+The tapered spectrum is zero-padded to n_ifft (2048 in mode A, 4096 in mode B) before the IFFT: interpolation in range, not information, but it makes peak positions and CFAR guard bands expressible in fine bins. gpr_pulse_width.m measures the window's cost and converts it into engineering numbers: broadening factor over rectangular, null-to-null mainlobe width in DFT bins, and the minimum CFAR guard band in IFFT bins - which is why cfar_guard = 8 is a measured requirement, not a taste.
+EQ: rp = IFFT_n_ifft( w_kaiser .* cal ) ;  guard_bins >= pulse_null_width * n_ifft/n_tones
+| Quantity | Mode A | Mode B |
+| n_tones / n_ifft | 256 / 2048 | 512 / 4096 |
+| window | kaiser beta 8 | kaiser beta 8 |
+| broadening | ~1.79x | ~1.79x |
+| guard cells | 8 (>= pulse width) | 8 |
+
+# Background removal: the component-wise median (B11)
+## The rank-1 clutter model
+For a level survey the direct coupling and the surface bounce are identical in every trace: they live in a single rank-1 mode whose right singular vector is the uniform vector across positions. Removing that mode is the whole job of B11; bg_remove_modes = 1 selects the component-wise median across positions as the estimator of it.
+## Why median and never mean
+A mean (or any rank-1 estimate with uniform right vector) also contains every strong localised target: subtracting it smears each target's energy over the entire section as a negative ghost at the target's range. The median is robust because a target occupies a minority of positions at any given range bin. This single choice is the difference between mode B showing five deep targets and showing five holes with skirts; the package's history keeps the bug report as a comment in code_background.m so nobody re-introduces it.
+FIG: gpr_bscan_trio.png | Raw B-scan with coupling band and hyperbolae; the component-wise median background estimate; the residual with hyperbolae intact and the band gone [simulated].
+| Choice | Effect |
+| median across positions | robust: targets are a minority per bin |
+| mean across positions | smears targets section-wide (historical bug) |
+| raw power iteration | converges to the strongest mode, i.e. targets again |
+
+# Migration: Kirchhoff coherent focusing (B12)
+## The imaging condition
+Each image point (z, x) collects the samples lying on its diffraction hyperbola R = sqrt(z^2 + (x - x_t)^2) from the traces x_t inside the migration aperture and adds them with matched phase. With migration_coherent true (default) the sum uses the complex range profiles with their phase, so sub-bin positioning survives; the magnitude-only variant exists as a configuration option and is strictly worse for closely spaced targets.
+## Aperture and footprint
+The aperture grows with depth as migration_aperture times depth (default 1.0), matching the antenna illumination: a fixed aperture under-migrates deep targets and over-migrates shallow ones with noise. The beam-footprint weighting from B01 keeps amplitudes physical across the aperture.
+FIG: gpr_migrated.png | Unmigrated range-bin image versus Kirchhoff-migrated image with truth markers: hyperbolae collapse to points [simulated].
+EQ: img(z,x) = | sum_{t in aperture} rp( tau(R(z,x,x_t)), x_t ) exp(+j phi_match) |
+
+# Detection: two-dimensional CFAR (B13)
+For every cell under test the surrounding noise level is estimated from training cells - a (2w+1)x(2w+1) window minus the (2g+1)x(2g+1) guard, w = guard+train - and the cell is a detection when its power exceeds alpha times the level, alpha derived from cfar_pfa and the training count. Two estimators ship: 'log' (default), the robust geometric-mean CFAR level = exp(mean(log p) + gamma) with Euler's gamma, suited to scenes where several targets share training rings; and 'mean', classical CA-CFAR, chosen in mode A because that scene is sparse and the arithmetic mean is the minimum-variance estimator there. Depth gating respects depth_min/depth_max so coupling residue and image edges never enter the statistics.
+FIG: gpr_cfar.png | Migrated image with CA-CFAR detections overlaid, and a mid-profile cut showing statistic versus adaptive threshold [simulated].
+| Parameter | Mode A | Mode B | Reason |
+| estimator | mean | log | sparse scene vs shared training rings |
+| pfa | 1e-6 | 1e-5 | false-alarm budget per scene |
+| guard / train | 8 / 16 | 8 / 16 | guard covers the compressed pulse |
+
+# Report: connected clusters and operator numbers (B14)
+B14 turns the detection matrix into the numbers an operator reads: detected-cell count, distinct detection count via 8-connected clustering, mean depth and cross-range of cluster peaks, shallowest and deepest peak. Clustering is union-find over the 8-neighbourhood, deterministic and order-independent; two corrections shipped with it (peak labelling per cluster and empty-scene guards) so an all-zero mask reports zeros instead of NaNs that would poison downstream logs.
+FIG: gpr_clusters.png | 8-connected clustering of a detection mask into distinct detections; isolated cells form their own cluster [simulated].
+| Report field | Meaning |
+| rep(1) | detected cells |
+| rep(2) | distinct detections (8-connected clusters) |
+| rep(3)/rep(4) | mean depth / cross-range of cluster peaks [m] |
+| rep(5)/rep(6) | shallowest / deepest cluster peak [m] |
+
+# The two shipped configurations
+## Mode A: UAV-mounted shallow SFCW GPR
+Reference configuration after Garcia-Fernandez et al. (2018): 0.5-3 GHz, 256 tones, 50 us dwell, 0.5 m standoff at 0.5 m/s, 10 m scan in 200 traces, 32 coherent averages, Vivaldi pair at 0.2 m separation, four small targets (0.01-0.5 m2) at 0.10-0.80 m depth in dry field soil, Kaiser beta 8 into a 2048-point IFFT, mean-CFAR at Pfa 1e-6 with guard 8 / train 16, imaging window 0.05-1.00 m.
+## Mode B: ground-coupled deep SFCW GPR
+Reference configuration after Annan (2005): 10-100 MHz, 512 tones, 200 us dwell, skid clearance 0.02 m at walking pace, 20 m scan in 200 traces, 128 averages, loaded bowtie at 1.5 m separation, five large targets (2-30 m2) at 3-15 m depth in dry sand, 16-bit conversion, 4096-point IFFT, log-CFAR at Pfa 1e-5, imaging window 2-18 m.
+FIG: gpr_modeAB.png | The two designs side by side: bandwidth, depth window and in-soil range cell; mode B trades bandwidth for attenuation [derived].
+| Field | Mode A | Mode B |
+| f_start / f_stop | 0.5 / 3 GHz | 10 / 100 MHz |
+| n_tones / n_ifft | 256 / 2048 | 512 / 4096 |
+| dwell | 50 us | 200 us |
+| standoff | 0.5 m | 0.02 m |
+| n_positions / scan | 200 / 10 m | 200 / 20 m |
+| n_averages | 32 | 128 |
+| ENOB | 14 | 16 |
+| soil mv / sigma | 0.08 / 0.005 | 0.05 / 0.001 |
+| CFAR | mean, 1e-6 | log, 1e-5 |
+| depth window | 0.05-1.0 m | 2-18 m |
+
+# Key performance equations
+EQ: df = (f_stop-f_start)/(n_tones-1) ; R_unamb = c/(2 df)
+EQ: delta_R_air = c/(2 B) ; delta_R_soil = c/(2 B sqrt(eps_r)) ; broadened by gpr_pulse_width factor
+EQ: sigma_avg = sigma_1/sqrt(n_averages) ; SQNR = 6.02*ENOB + 1.76 dB
+EQ: P_echo ~ EIRP * rcs * exp(-2 alpha R_soil) / R^4 ; CFAR: p > alpha(pfa, N_train) * level
+EQ: migration aperture = migration_aperture * depth ; footprint = max(footprint_min, 2 z tan(half angle))
+These are the equations check_physics_feasibility re-derives independently from cfg's hardware description; a configuration that cannot satisfy them is rejected before simulation, which is the package's answer to the classic GPR mistake of surveying a depth band the physics cannot reach.
+
+# Physics feasibility audit (check_physics_feasibility.m)
+The audit re-derives the survey from first principles - Dobson permittivity, radar equation, thermal noise, quantisation noise, sampling theory - and reports whether the configured system can actually see the configured targets. It does not trust cfg beyond the hardware description, so it catches the two classic mistakes: a band/depth combination attenuated into the noise, and a sampling grid (n_tones, n_ifft, spacing) that cannot represent the answer. Its verdict travels inside the results struct and is printed by the runners; a feasible configuration that fails detection is an algorithm bug, an infeasible one is a design error, and the audit is what tells them apart.
+
+# Validation architecture
+## Static checks: validate_package (83)
+Per configuration: every source file present; every code_*.m declares a function matching its file name; generated scripts parse (gpr_parse_script) and compile (gpr_compile_script); block I/O stamps agree with the empirical probe; spec wiring consistency; configuration guards; release fingerprints; path-shadow guard; and, when Simulink is installed, an optional build plus MATLAB-Coder offline check. The count grew 77 -> 83 across releases 1.0 -> 1.8 with each added check naming the bug class it closes.
+## Functional tests: test_gpr_package (12)
+T01 soil model, T02 axes, T03 config guards, T04 waveform, T05 calibration, T06 background, T07 migration focus, T08 CFAR false alarms, T09 report labelling, T10 test-point names, T11 end-to-end mode A, T12 end-to-end mode B. Each test exercises either a single generated block script (exactly the text that goes into Simulink) or the whole chain through run_pipeline_reference; t.ok is true only when all pass.
+## The empirical I/O probe (v1.8)
+Chart size/complexity stamps are obtained by running each block on typed dummy inputs, so stamps can never again disagree with the script they describe - the root cause of the R2024a compile saga, where a stale stamp surfaced as one obscure Coder error per round. Loud stamp warnings and release fingerprints make any stale installation identify itself in the first line of any log.
+## Golden behaviour of the shipped configurations
+Mode A end-to-end reports four distinct detections at the four configured targets with zero false alarms; mode B reports five with zero false alarms; both engines agree through gpr_extract_results, and the GPV repository's golden ROMs are generated from these same code_*.m sources, extending the validation to bit-exact RTL.
+
+# The Simulink model
+build_realistic_model.m constructs GPR_Realistic.slx: two subsystems matching the spec, one MATLAB Function block per algorithm block with the generated script pasted verbatim, constant blocks for parameters, TPnn_Scope scopes and tpnn loggers per test point, and explicit chart I/O sizes stamped from the empirical probe. Name-based stamping (v1.5) matches ports by .Name rather than by sorted order, because port-number sorting is unsafe across generator edits. Unfinished models are parked in tempdir (v1.6) so a failed build never leaves a half-written .slx in the package folder.
+| Rule learned under R2024a Coder | Where enforced |
+| no chained map(key){idx} indexing | generated script style |
+| persistent only read inside isempty guard | B10 cache pattern (v1.3) |
+| complex-first accumulators | B11/B12 type stability (v1.5) |
+| sizes frozen at first assignment | explicit chart stamps + probe |
+| single-assignment noise_std | B06/B08 contract (v1.8) |
+
+# Operator workflow
+FIG: gpr_workflow.png | Config -> check -> run -> extract -> display; validate_package and test_gpr_package gate every change.
+gpr_realistic_main chooses the engine (Simulink when installed, reference otherwise) and returns the results struct; gpr_realistic_gui draws the B-scan, the detection overlay and a depth profile at a chosen cross-range (default: strongest detection); gpr_extract_results unifies test-point forms; gpr_axes provides derived frequency/range/cross-range axes for any custom plotting. The shipped figures/mode_*_bscan.png and mode_*_detection.png are produced by exactly this path.
+
+# Design lessons preserved in the code
+- Mean versus median background: the mean smears targets section-wide; B11 keeps the bug report as a comment.
+- sqrt(N) versus N integration: noise was divided by N and counted twice; B06/B08 now split signal and noise level.
+- Double power scaling: TX normalisation and EIRP application live in different blocks since v1.x fixes.
+- Sidelobe skirt: untapered compression let migration inflate CFAR noise around deep targets; Kaiser is mandatory and measured by gpr_pulse_width.
+- SQNR law: full-scale-sine 6.02*ENOB+1.76 dB since v1.7.
+- Stale stamps: empirical probe since v1.8; stamps are measured, never typed.
+- Path shadowing: gpr_path_sanity detects a second installation before it can mix versions.
+Each lesson is a comment plus a check or test, which is the package's definition of "fixed at the root".
+
+# Worked example: one mode-A trace through all fourteen blocks
+Follow trace k = 100 of mode A numerically, stage by stage, to build intuition for scales and units; every number below is the kind the package's tests assert [derived from configured parameters].
+1. B01: position x = 10 m * 100/199 = 5.025 m, height 0.5 m; footprint at 0.5 m depth = max(0.30, 2*0.5*tan(30 deg)) = 0.577 m.
+2. B02: tone 0 at 0.5 GHz, tone 255 at 3.0 GHz, df = 9.8039 MHz; sweep time 256*50 us = 12.8 ms.
+3. B03: peak-normalised comb; PA backoff keeps every tone below P1dB so the comb stays linear and phase-coherent.
+4. B04: target 3 (0.5 m depth, x = 3.0 m) is 2.03 m away in cross-range: air leg sqrt(0.5^2+2.025^2) = 2.086 m, soil leg sqrt(0.5^2+0.506^2) = 0.709 m; two-way phase slope corresponds to about 2*2.086/c + 2*0.709/v.
+5. B05: coupling phase at 3 GHz = -2*pi*3e9*0.2/c = -4 pi rad, i.e. it lands in the first bins after compression.
+6. B06: ripple multiplies the trace; thermal sigma per quadrature from 20 kHz noise bandwidth and system_nf_d.
+7. B07: 14-bit auto-ranged quantisation adds sigma_q about -86 dBFS-referenced, below thermal in this scene.
+8. B08: 32 sweeps: signal unchanged, sigma falls by sqrt(32) = 5.66 (15.1 dB).
+9. B09: ripple and 5 ns delay divided out; residual phase slope is propagation only.
+10. B10: Kaiser beta 8, zero-pad 2048: target 3's peak appears at its two-way delay bin with -58 dB sidelobes.
+11. B11: median across 200 positions removes coupling band and surface line; the hyperbola of target 3 survives because it occupies a minority of positions per bin.
+12. B12: aperture at 0.5 m depth = 0.5 m; traces within +-0.25 m of x = 3.0 contribute coherently; the hyperbola collapses to a point at (0.5 m, 3.0 m).
+13. B13: mean-CFAR with guard 8 / train 16 at Pfa 1e-6: the focused peak exceeds alpha*level; isolated noise cells do not.
+14. B14: the four target clusters label as four distinct detections; rep(3) mean depth matches the configured mean of [0.10 0.25 0.50 0.80] within bin quantisation.
+## What each stage must NOT do
+- B03 must not apply absolute power; B04 owns EIRP.
+- B06 must not inject noise samples; B08 owns noise injection once.
+- B10 must not skip the taper; migration coherence makes sidelobes structural.
+- B11 must not use a mean; targets are outliers per bin by design.
+- B13 must not shrink guard below gpr_pulse_width's GUARD_BINS.
+- B14 must not emit NaN on an empty mask; logs downstream are not NaN-tolerant.
+
+# Validated image products of the shipped configurations
+The package ships four figures produced by the operator path (gpr_realistic_main then gpr_realistic_gui); they are reproduced here as [validated] outputs of version 1.8.
+FIG: val_mode_a_bscan.png | Mode A validated B-scan after background removal: four hyperbolae at 0.10-0.80 m depth over the 10 m scan [validated, package v1.8 output].
+FIG: val_mode_a_detection.png | Mode A migrated image with CFAR detections: four distinct clusters, zero false alarms [validated].
+FIG: val_mode_b_bscan.png | Mode B validated B-scan: five deep hyperbolae over the 20 m scan at 3-15 m depth [validated].
+FIG: val_mode_b_detection.png | Mode B migrated image with log-CFAR detections: five clusters, zero false alarms [validated].
+Reading these against the simulated views earlier in the book is the quickest way to check an installation: same shapes, same counts, same axes conventions.
+
+# Per-block numerical notes and validation hooks
+## B01-B04 numerical notes
+Sizes: env is 3 x n_positions real; tx is n_tones x 1 complex; ch and y are n_tones x n_positions complex. Conditioning: channel amplitudes span many decades (R^4 plus exp(-2 alpha R)); all downstream statistics are scale-aware (CFAR is ratio-based), so no normalisation is required, but displays use dB. Hook: T04 asserts the comb spacing and taper; the feasibility audit re-derives attenuation.
+## B05-B07 numerical notes
+Coupling is O(1) against target echoes of 1e-3 or less: the first range bins are dominated by leakage by design, which is why depth_min gates the CFAR. ADC output keeps the same complex matrix shape; noise_std is n_positions x 1 real and must stay single-assignment (v1.8) or Coder freezes a wrong size. Hook: T05 verifies calibration exactness; the SQNR law is asserted in validate_package.
+## B08-B10 numerical notes
+Averaged data is complex n_tones x n_positions; calibration leaves unit-magnitude ripple residue at machine precision; range profiles are n_ifft x n_positions complex with the Kaiser mainlobe 1.79x rectangular. Hook: gpr_pulse_width numbers are asserted against the window; T02 checks axes.
+## B11-B12 numerical notes
+Background output is complex of the same size; the median is taken component-wise on complex profiles (magnitude-aware in the migrated stage). Migration output is real and non-negative by construction (magnitude of the coherent sum), n_ifft x n_positions. Hook: T06 plants a target and asserts it survives the median; T07 asserts focus sharpening (peak-to-sidelobe ratio improves).
+## B13-B14 numerical notes
+Detection mask is logical n_ifft x n_positions gated to the depth window; report is 6 x 1 double, zeros on an empty scene. Hook: T08 measures false alarms on noise-only images against pfa; T09 asserts cluster labelling and peak depths.
+
+# Stage-by-stage sizes and complexity (both modes)
+| Stage | Mode A size | Mode B size | Complexity |
+| env | 3 x 200 | 3 x 200 | real |
+| tx | 256 x 1 | 512 x 1 | complex |
+| ch / y / rx / iq / avg / cal | 256 x 200 | 512 x 200 | complex |
+| noise_std | 200 x 1 | 200 x 1 | real |
+| rp / bg | 2048 x 200 | 4096 x 200 | complex |
+| mig | 2048 x 200 | 4096 x 200 | real >= 0 |
+| det | 2048 x 200 logical | 4096 x 200 logical | logical |
+| rep | 6 x 1 | 6 x 1 | real |
+These are exactly the shapes gpr_block_io_sizes returns and the empirical probe measures; Simulink chart stamps mirror them per port.
+
+# Release history commentary (v1.0 - v1.8)
+- v1.0 first validated release, 77 checks and 12 tests: the contract (spec, generators, two engines, TPs) frozen here.
+- v1.1 explicit Simulink chart I/O sizes, TP scopes, n_ifft rule: stamps became declarations, not guesses.
+- v1.2 MATLAB-legal map indexing and the path-shadow guard: two field-failure classes closed (Coder syntax and mixed installations).
+- v1.3 B10 persistent-cache Coder fix with the window baked in: the persistent-read-inside-isempty-guard rule entered the codebase.
+- v1.4 version stamp printed by validators and runners: stale installs became self-reporting.
+- v1.5 Coder type stability in B11/B12 and name-based chart stamping: complex-first accumulators and .Name matching replaced port-order sorting.
+- v1.6 offline MATLAB-Coder check inside validate_package; unfinished models parked in tempdir: validation no longer needed a full build, and failed builds stopped littering.
+- v1.7 full-scale-sine SQNR law and explicit noise_std reshape: a 3 dB margin error and a shape bug closed.
+- v1.8 empirical I/O probe, single-assignment noise_std, loud stamp warnings, release fingerprints: the root cause of the one-Coder-rule-per-round saga (stamps disagreeing with script text) removed by measurement.
+The pattern to notice: every release added a check or probe that makes the bug class impossible to reintroduce silently - the same discipline the GPV RTL package inherits.
+
+# Extending the package safely
+1. New optional config field: ship defaults via gpr_cfg_value; extend gpr_check_config derived fields only if physics depends on it; add a validate check.
+2. New block: generator code_b15_*.m, register in gpr_pipeline_spec (block list, wiring, outports), extend gpr_block_io_sizes, TP naming in gpr_tp_from_simout and gpr_extract_results, add a functional test, bump gpr_version with the reason.
+3. New window or estimator: implement in gpr_range_window / code_detection with a pfa-to-alpha derivation, extend gpr_pulse_width, add T-style assertions on guard bins and false-alarm rate.
+4. Any change to B06/B08 noise contract or B11 estimator: update this book's sections 11 and 14 in the same commit; the prose is part of the interface.
+
+# Appendix A - Block I/O summary
+| Block | Inputs | Outputs |
+| B01_Environment | altitude, scan_length | env [3 x n_positions] |
+| B02_Waveform | f_start, f_stop | tx [n_tones x 1] |
+| B03_TX_Chain | tx, pa_gain_d | tx_out [n_tones x 1] normalised |
+| B04_Channel | env, tx, moisture, sigma, target vectors, f_start, f_stop | ch [n_tones x n_positions] |
+| B05_Coupling | tx, coupling_dB, ch | y [n_tones x n_positions] |
+| B06_RX | y, gains/losses/delay | rx [n_tones x n_positions], noise_std [n_positions x 1] |
+| B07_ADC | rx, enob, noise | iq [n_tones x n_positions], noise_std |
+| B08_Averaging | iq, noise_std, n_avg | avg [n_tones x n_positions] |
+| B09_Calibration | avg, f_start, f_stop | cal [n_tones x n_positions] |
+| B10_RangeProc | cal, beta | rp [n_ifft x n_positions] complex |
+| B11_Background | rp, modes | bg-cleaned [n_ifft x n_positions] |
+| B12_Migration | bs, f_start/stop, moisture, sigma, depth_max, scan_len, alt | mig [n_ifft x n_positions] real >= 0 |
+| B13_Detection | mig, cfar params | det mask |
+| B14_Report | det, axes | rep [6 x 1] |
+Full analytic sizes and complexity flags per port are returned by gpr_block_io_sizes(cfg) and are stamped into the Simulink charts from the empirical probe.
+
+# Appendix B - Equation collection
+EQ: df, R_unamb, delta_R (section 5)
+EQ: soil: eps_r(mv,f), alpha(mv,sigma,f), v = c/sqrt(eps_r)
+EQ: H_ch two-way sum (section 8)
+EQ: coupling phase exp(-j 2 pi f sep/c)
+EQ: sigma_thermal, sigma/sqrt(N), SQNR law
+EQ: Kaiser taper, zero-pad IFFT, pulse broadening/guard bins
+EQ: median background rank-1 mode
+EQ: Kirchhoff imaging condition
+EQ: CA/log-CFAR threshold with alpha(pfa, N_train)
+EQ: 8-connected cluster report fields
+
+# Appendix C - Glossary
+| Term | Meaning |
+| SFCW | stepped-frequency continuous wave |
+| A-scan / B-scan | single trace / position-stack image |
+| ENOB | effective number of bits |
+| CFAR | constant false alarm rate |
+| CA-CFAR | cell-averaging CFAR (estimator 'mean') |
+| log-CFAR | geometric-mean robust CFAR (estimator 'log') |
+| TP | test point TP01-TP14 |
+| stamp | chart I/O size/complexity metadata |
+| empirical probe | v1.8 measurement of stamps by execution |
